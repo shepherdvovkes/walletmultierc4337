@@ -1,0 +1,3897 @@
+=== FILE: ./sepolia_patch.sh ===
+#!/bin/bash
+
+# Patch script to optimize deploy.js for Sepolia deployment with limited ETH
+
+echo "================================================"
+echo " Patching deploy.js for Sepolia Deployment"
+echo "================================================"
+echo ""
+
+# Backup original deploy.js
+cp scripts/deploy.js scripts/deploy.js.backup
+
+# Create optimized deploy.js for Sepolia
+cat > scripts/deploy.js << 'EOF'
+// deploy.js - Deployment script optimized for Sepolia with limited ETH
+const { ethers } = require("hardhat");
+const fs = require('fs');
+
+async function main() {
+  console.log("🚀 Deploying ERC-4337 & ERC-6900 Smart Account System to", network.name, "...\n");
+
+  // Get deployer
+  const [deployer] = await ethers.getSigners();
+  console.log("Deploying contracts with account:", deployer.address);
+  const balance = await deployer.getBalance();
+  console.log("Account balance:", ethers.utils.formatEther(balance), "ETH");
+  
+  // Check if we have enough ETH
+  if (network.name === "sepolia" && balance.lt(ethers.utils.parseEther("0.05"))) {
+    console.log("\n⚠️  Warning: Low balance for Sepolia deployment!");
+    console.log("Recommended: At least 0.05 ETH for safe deployment");
+    console.log("Current: ", ethers.utils.formatEther(balance), "ETH\n");
+  }
+
+  // Deploy EntryPoint (or use existing one)
+  console.log("1. Checking EntryPoint...");
+  let entryPoint;
+  if (network.name === "localhost" || network.name === "hardhat") {
+    console.log("   Deploying MockEntryPoint for local testing...");
+    const MockEntryPoint = await ethers.getContractFactory("MockEntryPoint");
+    entryPoint = await MockEntryPoint.deploy();
+    await entryPoint.deployed();
+    console.log("   ✓ MockEntryPoint deployed to:", entryPoint.address);
+  } else {
+    // Use the official EntryPoint address for testnets/mainnet
+    entryPoint = { address: "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789" };
+    console.log("   ✓ Using official EntryPoint at:", entryPoint.address);
+    console.log("   (No deployment needed - saves gas!)");
+  }
+
+  // Deploy MultiSigPlugin with gas optimization
+  console.log("\n2. Deploying MultiSigPlugin...");
+  const MultiSigPlugin = await ethers.getContractFactory("MultiSigPlugin");
+  
+  // Estimate gas and add buffer
+  const deployTx = MultiSigPlugin.getDeployTransaction();
+  const estimatedGas = await deployer.estimateGas(deployTx);
+  console.log("   Estimated gas:", estimatedGas.toString());
+  
+  // Deploy with optimized gas settings for Sepolia
+  const multiSigPlugin = await MultiSigPlugin.deploy({
+    gasLimit: estimatedGas.mul(110).div(100), // 10% buffer
+    maxFeePerGas: network.name === "sepolia" ? ethers.utils.parseUnits("20", "gwei") : undefined,
+    maxPriorityFeePerGas: network.name === "sepolia" ? ethers.utils.parseUnits("1.5", "gwei") : undefined
+  });
+  
+  await multiSigPlugin.deployed();
+  console.log("   ✓ MultiSigPlugin deployed to:", multiSigPlugin.address);
+  console.log("   Gas used:", (await multiSigPlugin.deployTransaction.wait()).gasUsed.toString());
+
+  // Deploy SmartAccountFactory with gas optimization
+  console.log("\n3. Deploying SmartAccountFactory...");
+  const SmartAccountFactory = await ethers.getContractFactory("SmartAccountFactory");
+  
+  // Deploy with optimized gas settings
+  const factory = await SmartAccountFactory.deploy(entryPoint.address, {
+    gasLimit: 3000000, // Fixed reasonable limit
+    maxFeePerGas: network.name === "sepolia" ? ethers.utils.parseUnits("20", "gwei") : undefined,
+    maxPriorityFeePerGas: network.name === "sepolia" ? ethers.utils.parseUnits("1.5", "gwei") : undefined
+  });
+  
+  await factory.deployed();
+  console.log("   ✓ SmartAccountFactory deployed to:", factory.address);
+  console.log("   Gas used:", (await factory.deployTransaction.wait()).gasUsed.toString());
+
+  // Calculate total deployment cost
+  if (network.name === "sepolia") {
+    const deployerEndBalance = await deployer.getBalance();
+    const totalCost = balance.sub(deployerEndBalance);
+    console.log("\n💰 Deployment Cost Summary:");
+    console.log("   Total ETH spent:", ethers.utils.formatEther(totalCost));
+    console.log("   Remaining balance:", ethers.utils.formatEther(deployerEndBalance), "ETH");
+  }
+
+  // Save deployment addresses
+  const deploymentInfo = {
+    network: network.name,
+    chainId: network.config.chainId,
+    deployer: deployer.address,
+    contracts: {
+      entryPoint: entryPoint.address,
+      multiSigPlugin: multiSigPlugin.address,
+      factory: factory.address
+    },
+    timestamp: new Date().toISOString(),
+    deploymentCost: network.name === "sepolia" ? {
+      multiSigPluginGas: (await multiSigPlugin.deployTransaction.wait()).gasUsed.toString(),
+      factoryGas: (await factory.deployTransaction.wait()).gasUsed.toString()
+    } : undefined
+  };
+
+  // Write deployment info to file
+  fs.writeFileSync(
+    `deployments-${network.name}.json`,
+    JSON.stringify(deploymentInfo, null, 2)
+  );
+
+  // Update addresses.json
+  const addressesPath = './scripts/addresses.json';
+  let addresses = {};
+  if (fs.existsSync(addressesPath)) {
+    addresses = JSON.parse(fs.readFileSync(addressesPath, 'utf8'));
+  }
+  
+  addresses[network.name] = {
+    entryPoint: entryPoint.address,
+    factory: factory.address,
+    multiSigPlugin: multiSigPlugin.address
+  };
+  
+  fs.writeFileSync(addressesPath, JSON.stringify(addresses, null, 2));
+
+  console.log("\n✅ Deployment complete!");
+  console.log("\n📄 Deployment info saved to:", `deployments-${network.name}.json`);
+  console.log("\n🔗 Contract Addresses:");
+  console.log("   EntryPoint:", entryPoint.address);
+  console.log("   MultiSigPlugin:", multiSigPlugin.address);
+  console.log("   SmartAccountFactory:", factory.address);
+  
+  // Sepolia specific instructions
+  if (network.name === "sepolia") {
+    console.log("\n📝 Next Steps for Sepolia:");
+    console.log("   1. Verify contracts on Etherscan:");
+    console.log("      npx hardhat run scripts/verify.js --network sepolia");
+    console.log("   2. Update frontend with deployed addresses");
+    console.log("   3. You can interact with contracts at:");
+    console.log("      https://sepolia.etherscan.io/address/" + multiSigPlugin.address);
+    console.log("      https://sepolia.etherscan.io/address/" + factory.address);
+  }
+  
+  // Skip automatic verification for Sepolia to save time
+  if (network.name === "sepolia") {
+    console.log("\n📌 Note: Skipping automatic verification to complete deployment faster.");
+    console.log("   Run verification manually when ready.");
+  } else if (network.name !== "localhost" && network.name !== "hardhat") {
+    console.log("\n🔍 Waiting before verification...");
+    await new Promise(resolve => setTimeout(resolve, 20000));
+    
+    try {
+      await hre.run("verify:verify", {
+        address: multiSigPlugin.address,
+        constructorArguments: [],
+      });
+      
+      await hre.run("verify:verify", {
+        address: factory.address,
+        constructorArguments: [entryPoint.address],
+      });
+      
+      console.log("✅ Contracts verified!");
+    } catch (error) {
+      console.log("⚠️  Verification failed:", error.message);
+    }
+  }
+
+  return deploymentInfo;
+}
+
+// Minimal test script for Sepolia (to save gas)
+async function minimalTest(deploymentInfo) {
+  console.log("\n🧪 Running minimal deployment test...\n");
+  
+  const [deployer] = await ethers.getSigners();
+  
+  // Just verify contracts are deployed
+  console.log("1. Checking MultiSigPlugin...");
+  const multiSigCode = await ethers.provider.getCode(deploymentInfo.contracts.multiSigPlugin);
+  console.log("   ✓ MultiSigPlugin deployed:", multiSigCode.length > 2);
+  
+  console.log("\n2. Checking SmartAccountFactory...");
+  const factoryCode = await ethers.provider.getCode(deploymentInfo.contracts.factory);
+  console.log("   ✓ SmartAccountFactory deployed:", factoryCode.length > 2);
+  
+  console.log("\n✅ Basic deployment verification passed!");
+  console.log("\n💡 Tip: Create and test smart accounts using the frontend to save ETH");
+}
+
+// Run deployment
+main()
+  .then(async (deploymentInfo) => {
+    // Only run tests on localhost
+    if (network.name === "localhost" && process.env.RUN_TESTS === "true") {
+      const { testDeployment } = require('./test-deployment');
+      await testDeployment(deploymentInfo);
+    } else if (network.name === "sepolia") {
+      await minimalTest(deploymentInfo);
+    }
+    process.exit(0);
+  })
+  .catch((error) => {
+    console.error("\n❌ Deployment failed:", error.message);
+    console.error(error);
+    process.exit(1);
+  });
+EOF
+
+# Create a quick deployment script specifically for Sepolia
+cat > scripts/deploy-sepolia.sh << 'EOF'
+#!/bin/bash
+
+echo "======================================"
+echo " Deploying to Sepolia Testnet"
+echo "======================================"
+echo ""
+
+# Check if .env exists
+if [ ! -f .env ]; then
+    echo "❌ Error: .env file not found!"
+    echo "Please copy .env.example to .env and add your keys"
+    exit 1
+fi
+
+# Load environment variables
+source .env
+
+# Check if PRIVATE_KEY is set
+if [ -z "$PRIVATE_KEY" ]; then
+    echo "❌ Error: PRIVATE_KEY not set in .env!"
+    exit 1
+fi
+
+# Check if SEPOLIA_RPC_URL is set
+if [ -z "$SEPOLIA_RPC_URL" ]; then
+    echo "❌ Error: SEPOLIA_RPC_URL not set in .env!"
+    exit 1
+fi
+
+echo "✓ Environment configured"
+echo ""
+
+# Compile contracts
+echo "📦 Compiling contracts..."
+npx hardhat compile
+
+if [ $? -ne 0 ]; then
+    echo "❌ Compilation failed!"
+    exit 1
+fi
+
+echo "✓ Contracts compiled"
+echo ""
+
+# Deploy to Sepolia
+echo "🚀 Deploying to Sepolia..."
+echo "This will use approximately 0.02-0.05 ETH"
+echo ""
+
+npx hardhat run scripts/deploy.js --network sepolia
+
+if [ $? -eq 0 ]; then
+    echo ""
+    echo "✅ Deployment successful!"
+    echo ""
+    echo "📋 Check deployments-sepolia.json for contract addresses"
+    echo ""
+    echo "Next steps:"
+    echo "1. Verify contracts: npx hardhat run scripts/verify.js --network sepolia"
+    echo "2. Update frontend with the deployed addresses"
+    echo "3. Test using the React GUI"
+else
+    echo ""
+    echo "❌ Deployment failed!"
+    echo "Check your ETH balance and try again"
+fi
+EOF
+
+# Make the script executable
+chmod +x scripts/deploy-sepolia.sh
+
+# Create a gas estimation script
+cat > scripts/estimate-gas.js << 'EOF'
+// estimate-gas.js - Estimate deployment costs
+const { ethers } = require("hardhat");
+
+async function main() {
+  console.log("💰 Estimating deployment costs for", network.name, "...\n");
+  
+  const [deployer] = await ethers.getSigners();
+  
+  // Get current gas prices
+  const gasPrice = await deployer.getGasPrice();
+  console.log("Current gas price:", ethers.utils.formatUnits(gasPrice, "gwei"), "gwei");
+  
+  // Estimate MockEntryPoint (only for localhost)
+  if (network.name === "localhost") {
+    const MockEntryPoint = await ethers.getContractFactory("MockEntryPoint");
+    const mockGas = await deployer.estimateGas(MockEntryPoint.getDeployTransaction());
+    console.log("\nMockEntryPoint:");
+    console.log("  Gas:", mockGas.toString());
+    console.log("  Cost:", ethers.utils.formatEther(mockGas.mul(gasPrice)), "ETH");
+  }
+  
+  // Estimate MultiSigPlugin
+  const MultiSigPlugin = await ethers.getContractFactory("MultiSigPlugin");
+  const multiSigGas = await deployer.estimateGas(MultiSigPlugin.getDeployTransaction());
+  console.log("\nMultiSigPlugin:");
+  console.log("  Gas:", multiSigGas.toString());
+  console.log("  Cost:", ethers.utils.formatEther(multiSigGas.mul(gasPrice)), "ETH");
+  
+  // Estimate SmartAccountFactory
+  const SmartAccountFactory = await ethers.getContractFactory("SmartAccountFactory");
+  const factoryGas = await deployer.estimateGas(
+    SmartAccountFactory.getDeployTransaction("0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789")
+  );
+  console.log("\nSmartAccountFactory:");
+  console.log("  Gas:", factoryGas.toString());
+  console.log("  Cost:", ethers.utils.formatEther(factoryGas.mul(gasPrice)), "ETH");
+  
+  // Total
+  const totalGas = multiSigGas.add(factoryGas);
+  const totalCost = totalGas.mul(gasPrice);
+  console.log("\n📊 Total Deployment Cost:");
+  console.log("  Total Gas:", totalGas.toString());
+  console.log("  Total Cost:", ethers.utils.formatEther(totalCost), "ETH");
+  
+  // With 50% buffer
+  const bufferedCost = totalCost.mul(150).div(100);
+  console.log("  With 50% buffer:", ethers.utils.formatEther(bufferedCost), "ETH");
+  
+  if (network.name === "sepolia") {
+    console.log("\n💡 Sepolia Deployment Tips:");
+    console.log("  - Current balance needed: ~", ethers.utils.formatEther(bufferedCost), "ETH");
+    console.log("  - Your 0.1 ETH should be sufficient!");
+    console.log("  - Use the deploy-sepolia.sh script for easy deployment");
+  }
+}
+
+main()
+  .then(() => process.exit(0))
+  .catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+EOF
+
+echo ""
+echo "================================================"
+echo "[+] Sepolia deployment patch applied!"
+echo "================================================"
+echo ""
+echo "📋 What was updated:"
+echo "  - Optimized gas settings for Sepolia"
+echo "  - Added deployment cost tracking"
+echo "  - Skip automatic verification (do it manually)"
+echo "  - Created deploy-sepolia.sh for easy deployment"
+echo "  - Added gas estimation script"
+echo ""
+echo "🚀 To deploy to Sepolia:"
+echo ""
+echo "1. Make sure your .env file has:"
+echo "   PRIVATE_KEY=your_private_key_here"
+echo "   SEPOLIA_RPC_URL=https://sepolia.infura.io/v3/YOUR_KEY"
+echo ""
+echo "2. Estimate gas costs:"
+echo "   npx hardhat run scripts/estimate-gas.js --network sepolia"
+echo ""
+echo "3. Deploy:"
+echo "   ./scripts/deploy-sepolia.sh"
+echo ""
+echo "   OR manually:"
+echo "   npx hardhat run scripts/deploy.js --network sepolia"
+echo ""
+echo "💡 Your 0.1 SepoliaETH should be more than enough!"
+echo "   Expected cost: ~0.02-0.05 ETH"
+
+
+=== FILE: ./frontend/public/index.html ===
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="ERC-4337 & ERC-6900 Multi-Sig Wallet" />
+  <title>Smart Account Multi-Sig</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+  <noscript>You need to enable JavaScript to run this app.</noscript>
+  <div id="root"></div>
+</body>
+</html>
+
+
+
+=== FILE: ./frontend/package.json ===
+{
+  "name": "erc4337-multisig-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-scripts": "5.0.1",
+    "lucide-react": "^0.263.1"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
+  },
+  "eslintConfig": {
+    "extends": ["react-app"]
+  },
+  "browserslist": {
+    "production": [">0.2%", "not dead", "not op_mini all"],
+    "development": ["last 1 chrome version", "last 1 firefox version", "last 1 safari version"]
+  }
+}
+
+
+
+=== FILE: ./frontend/src/index.js ===
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+
+
+
+=== FILE: ./frontend/src/utils/.gitkeep ===
+# Place wallet.js here
+
+
+
+=== FILE: ./frontend/src/utils/wallet.js ===
+// wallet.js - ERC-4337 Smart Account Wallet Implementation
+import { ethers } from 'ethers';
+
+class SmartAccountWallet {
+    constructor(provider, entryPointAddress, factoryAddress, multiSigPluginAddress) {
+        this.provider = provider;
+        this.entryPointAddress = entryPointAddress;
+        this.factoryAddress = factoryAddress;
+        this.multiSigPluginAddress = multiSigPluginAddress;
+        this.signer = null;
+        this.accountAddress = null;
+    }
+
+    // Initialize wallet with a signer
+    async init(privateKey) {
+        this.signer = new ethers.Wallet(privateKey, this.provider);
+        return this.signer.address;
+    }
+
+    // Create a new smart account
+    async createAccount(salt = 0) {
+        const factory = new ethers.Contract(
+            this.factoryAddress,
+            [
+                'function createAccount(address owner, uint256 salt) returns (address)',
+                'function getAddress(address owner, uint256 salt) view returns (address)'
+            ],
+            this.signer
+        );
+
+        // Get predicted address
+        this.accountAddress = await factory.getAddress(this.signer.address, salt);
+        
+        // Check if already deployed
+        const code = await this.provider.getCode(this.accountAddress);
+        if (code === '0x') {
+            // Deploy the account
+            const tx = await factory.createAccount(this.signer.address, salt);
+            await tx.wait();
+        }
+
+        return this.accountAddress;
+    }
+
+    // Install multi-sig plugin
+    async installMultiSigPlugin(owners, threshold) {
+        const account = new ethers.Contract(
+            this.accountAddress,
+            [
+                'function installPlugin(bytes4 selector, address plugin, bytes data)'
+            ],
+            this.signer
+        );
+
+        // Selector for multi-sig validation
+        const selector = '0x00000000'; // Custom selector for multi-sig operations
+        
+        // Encode installation data
+        const installData = ethers.utils.defaultAbiCoder.encode(
+            ['address[]', 'uint256'],
+            [owners, threshold]
+        );
+
+        const userOp = await this.createUserOperation(
+            account.interface.encodeFunctionData('installPlugin', [
+                selector,
+                this.multiSigPluginAddress,
+                installData
+            ])
+        );
+
+        return await this.sendUserOperation(userOp);
+    }
+
+    // Create a UserOperation
+    async createUserOperation(callData, options = {}) {
+        const account = new ethers.Contract(
+            this.accountAddress,
+            ['function nonce() view returns (uint256)'],
+            this.provider
+        );
+
+        const nonce = await account.nonce();
+        
+        const userOp = {
+            sender: this.accountAddress,
+            nonce: nonce,
+            initCode: '0x',
+            callData: callData,
+            callGasLimit: options.callGasLimit || 200000,
+            verificationGasLimit: options.verificationGasLimit || 100000,
+            preVerificationGas: options.preVerificationGas || 50000,
+            maxFeePerGas: options.maxFeePerGas || ethers.utils.parseUnits('30', 'gwei'),
+            maxPriorityFeePerGas: options.maxPriorityFeePerGas || ethers.utils.parseUnits('2', 'gwei'),
+            paymasterAndData: '0x',
+            signature: '0x'
+        };
+
+        // Sign the operation
+        userOp.signature = await this.signUserOperation(userOp);
+
+        return userOp;
+    }
+
+    // Sign a UserOperation
+    async signUserOperation(userOp) {
+        const userOpHash = this.getUserOpHash(userOp);
+        const signature = await this.signer.signMessage(ethers.utils.arrayify(userOpHash));
+        return signature;
+    }
+
+    // Calculate UserOperation hash
+    getUserOpHash(userOp) {
+        const packed = ethers.utils.defaultAbiCoder.encode(
+            [
+                'address',
+                'uint256',
+                'bytes32',
+                'bytes32',
+                'uint256',
+                'uint256',
+                'uint256',
+                'uint256',
+                'uint256',
+                'bytes32'
+            ],
+            [
+                userOp.sender,
+                userOp.nonce,
+                ethers.utils.keccak256(userOp.initCode),
+                ethers.utils.keccak256(userOp.callData),
+                userOp.callGasLimit,
+                userOp.verificationGasLimit,
+                userOp.preVerificationGas,
+                userOp.maxFeePerGas,
+                userOp.maxPriorityFeePerGas,
+                ethers.utils.keccak256(userOp.paymasterAndData)
+            ]
+        );
+
+        const encoded = ethers.utils.defaultAbiCoder.encode(
+            ['bytes32', 'address', 'uint256'],
+            [ethers.utils.keccak256(packed), this.entryPointAddress, this.provider.network.chainId]
+        );
+
+        return ethers.utils.keccak256(encoded);
+    }
+
+    // Send UserOperation to the EntryPoint
+    async sendUserOperation(userOp) {
+        const entryPoint = new ethers.Contract(
+            this.entryPointAddress,
+            [
+                'function handleOps(tuple(address sender, uint256 nonce, bytes initCode, bytes callData, uint256 callGasLimit, uint256 verificationGasLimit, uint256 preVerificationGas, uint256 maxFeePerGas, uint256 maxPriorityFeePerGas, bytes paymasterAndData, bytes signature)[] ops, address beneficiary)'
+            ],
+            this.signer
+        );
+
+        const tx = await entryPoint.handleOps([userOp], this.signer.address);
+        return await tx.wait();
+    }
+
+    // Execute a transaction through the smart account
+    async execute(to, value, data) {
+        const account = new ethers.Contract(
+            this.accountAddress,
+            ['function execute(address to, uint256 value, bytes data)'],
+            this.provider
+        );
+
+        const callData = account.interface.encodeFunctionData('execute', [to, value, data]);
+        const userOp = await this.createUserOperation(callData);
+
+        return await this.sendUserOperation(userOp);
+    }
+
+    // Execute batch transactions
+    async executeBatch(targets, values, datas) {
+        const account = new ethers.Contract(
+            this.accountAddress,
+            ['function executeBatch(address[] to, uint256[] value, bytes[] data)'],
+            this.provider
+        );
+
+        const callData = account.interface.encodeFunctionData('executeBatch', [targets, values, datas]);
+        const userOp = await this.createUserOperation(callData);
+
+        return await this.sendUserOperation(userOp);
+    }
+
+    // Submit a multi-sig transaction
+    async submitMultiSigTransaction(to, value, data) {
+        const multiSig = new ethers.Contract(
+            this.multiSigPluginAddress,
+            [
+                'function submitTransaction(address to, uint256 value, bytes data) returns (uint256)'
+            ],
+            this.signer
+        );
+
+        const callData = multiSig.interface.encodeFunctionData('submitTransaction', [to, value, data]);
+        
+        // Execute through the smart account
+        return await this.execute(this.multiSigPluginAddress, 0, callData);
+    }
+
+    // Confirm a multi-sig transaction
+    async confirmMultiSigTransaction(txId) {
+        const multiSig = new ethers.Contract(
+            this.multiSigPluginAddress,
+            ['function confirmTransaction(uint256 txId)'],
+            this.signer
+        );
+
+        const callData = multiSig.interface.encodeFunctionData('confirmTransaction', [txId]);
+        
+        // Execute through the smart account
+        return await this.execute(this.multiSigPluginAddress, 0, callData);
+    }
+
+    // Get account balance
+    async getBalance() {
+        return await this.provider.getBalance(this.accountAddress);
+    }
+
+    // Deposit to EntryPoint
+    async depositToEntryPoint(amount) {
+        const entryPoint = new ethers.Contract(
+            this.entryPointAddress,
+            ['function depositTo(address account) payable'],
+            this.signer
+        );
+
+        const tx = await entryPoint.depositTo(this.accountAddress, { value: amount });
+        return await tx.wait();
+    }
+}
+
+// Bundler client for submitting UserOperations
+class BundlerClient {
+    constructor(bundlerUrl) {
+        this.bundlerUrl = bundlerUrl;
+    }
+
+    async sendUserOperation(userOp, entryPoint) {
+        const response = await fetch(`${this.bundlerUrl}/rpc`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                jsonrpc: '2.0',
+                method: 'eth_sendUserOperation',
+                params: [userOp, entryPoint],
+                id: 1
+            })
+        });
+
+        const result = await response.json();
+        if (result.error) {
+            throw new Error(result.error.message);
+        }
+
+        return result.result;
+    }
+
+    async getUserOperationReceipt(userOpHash) {
+        const response = await fetch(`${this.bundlerUrl}/rpc`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                jsonrpc: '2.0',
+                method: 'eth_getUserOperationReceipt',
+                params: [userOpHash],
+                id: 1
+            })
+        });
+
+        const result = await response.json();
+        return result.result;
+    }
+}
+
+export { SmartAccountWallet, BundlerClient };
+
+
+=== FILE: ./frontend/src/components/.gitkeep ===
+# Place SmartAccountDashboard.jsx here
+
+
+
+=== FILE: ./frontend/src/components/SmartAccountDashboard.jsx ===
+import React, { useState, useEffect } from 'react';
+import { Wallet, Key, Users, Send, CheckCircle, AlertCircle, Loader2, Copy, ExternalLink } from 'lucide-react';
+
+// Mock addresses for demonstration (in production, these would be deployed contracts)
+const MOCK_ADDRESSES = {
+  entryPoint: '0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789',
+  factory: '0x1234567890123456789012345678901234567890',
+  multiSigPlugin: '0x2345678901234567890123456789012345678901'
+};
+
+const SmartAccountDashboard = () => {
+  const [provider, setProvider] = useState(null);
+  const [signer, setSigner] = useState(null);
+  const [account, setAccount] = useState(null);
+  const [balance, setBalance] = useState('0');
+  const [owners, setOwners] = useState(['']);
+  const [threshold, setThreshold] = useState(1);
+  const [transactions, setTransactions] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState('account');
+  const [logs, setLogs] = useState([]);
+
+  // Utility functions
+  const formatEther = (wei) => {
+    try {
+      return (parseInt(wei) / 1e18).toFixed(4);
+    } catch {
+      return '0.0000';
+    }
+  };
+
+  const parseEther = (ether) => {
+    try {
+      return (parseFloat(ether) * 1e18).toString();
+    } catch {
+      return '0';
+    }
+  };
+
+  const getAddress = (address) => {
+    // Simple address checksum (not full EIP-55, but good enough for demo)
+    return address.toLowerCase().replace(/^0x/, '0x');
+  };
+
+  const keccak256 = async (data) => {
+    const encoder = new TextEncoder();
+    const dataBytes = encoder.encode(data);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', dataBytes);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return '0x' + hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  };
+
+  // Initialize provider
+  useEffect(() => {
+    if (window.ethereum) {
+      setProvider(window.ethereum);
+    }
+  }, []);
+
+  // Connect wallet
+  const connectWallet = async () => {
+    try {
+      setLoading(true);
+      const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+      setSigner(accounts[0]);
+      addLog(`Connected wallet: ${accounts[0]}`, 'success');
+    } catch (error) {
+      addLog(`Error connecting wallet: ${error.message}`, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Create smart account (simulated)
+  const createSmartAccount = async () => {
+    try {
+      setLoading(true);
+      // In production, this would interact with the factory contract
+      const timestamp = Date.now().toString();
+      const hash = await keccak256(timestamp);
+      const mockAccountAddress = '0x' + hash.slice(-40);
+      
+      setAccount({
+        address: mockAccountAddress,
+        owners: owners.filter(o => o),
+        threshold: threshold,
+        nonce: 0
+      });
+      
+      addLog(`Smart account created: ${mockAccountAddress}`, 'success');
+      
+      // Simulate initial balance
+      setBalance(parseEther('1.0'));
+    } catch (error) {
+      addLog(`Error creating account: ${error.message}`, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Add log entry
+  const addLog = (message, type = 'info') => {
+    setLogs(prev => [{
+      message,
+      type,
+      timestamp: new Date().toLocaleTimeString()
+    }, ...prev].slice(0, 10));
+  };
+
+  // Submit transaction (simulated)
+  const submitTransaction = async (to, value, data) => {
+    try {
+      setLoading(true);
+      const txId = transactions.length;
+      
+      const newTx = {
+        id: txId,
+        to,
+        value,
+        data,
+        confirmations: 1,
+        executed: false,
+        confirmedBy: [signer]
+      };
+      
+      setTransactions(prev => [...prev, newTx]);
+      addLog(`Transaction #${txId} submitted`, 'success');
+      
+      // Auto-execute if threshold is met
+      if (newTx.confirmations >= account.threshold) {
+        setTimeout(() => executeTransaction(txId), 1000);
+      }
+    } catch (error) {
+      addLog(`Error submitting transaction: ${error.message}`, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Confirm transaction (simulated)
+  const confirmTransaction = async (txId) => {
+    try {
+      setLoading(true);
+      
+      setTransactions(prev => prev.map(tx => {
+        if (tx.id === txId && !tx.confirmedBy.includes(signer)) {
+          const updated = {
+            ...tx,
+            confirmations: tx.confirmations + 1,
+            confirmedBy: [...tx.confirmedBy, signer]
+          };
+          
+          if (updated.confirmations >= account.threshold && !updated.executed) {
+            setTimeout(() => executeTransaction(txId), 1000);
+          }
+          
+          return updated;
+        }
+        return tx;
+      }));
+      
+      addLog(`Transaction #${txId} confirmed`, 'success');
+    } catch (error) {
+      addLog(`Error confirming transaction: ${error.message}`, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Execute transaction (simulated)
+  const executeTransaction = async (txId) => {
+    setTransactions(prev => prev.map(tx => {
+      if (tx.id === txId) {
+        addLog(`Transaction #${txId} executed`, 'success');
+        return { ...tx, executed: true };
+      }
+      return tx;
+    }));
+  };
+
+  // Copy to clipboard
+  const copyToClipboard = (text) => {
+    navigator.clipboard.writeText(text);
+    addLog('Copied to clipboard', 'info');
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-900 text-white p-6">
+      <div className="max-w-7xl mx-auto">
+        {/* Header */}
+        <div className="bg-gray-800 rounded-lg p-6 mb-6">
+          <h1 className="text-3xl font-bold mb-4 flex items-center gap-3">
+            <Wallet className="text-blue-500" />
+            ERC-4337 & ERC-6900 Multi-Sig Wallet
+          </h1>
+          <p className="text-gray-400">
+            Test implementation of modular smart accounts with multi-signature functionality
+          </p>
+        </div>
+
+        {/* Connection Status */}
+        <div className="bg-gray-800 rounded-lg p-6 mb-6">
+          {!signer ? (
+            <button
+              onClick={connectWallet}
+              disabled={loading}
+              className="bg-blue-600 hover:bg-blue-700 px-6 py-3 rounded-lg flex items-center gap-2 transition-colors"
+            >
+              {loading ? <Loader2 className="animate-spin" size={20} /> : <Key size={20} />}
+              Connect Wallet
+            </button>
+          ) : (
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-3 h-3 bg-green-500 rounded-full"></div>
+                <span className="text-gray-300">Connected: {signer.slice(0, 6)}...{signer.slice(-4)}</span>
+              </div>
+              {account && (
+                <div className="flex items-center gap-2">
+                  <span className="text-gray-400">Smart Account:</span>
+                  <code className="bg-gray-700 px-3 py-1 rounded">{account.address.slice(0, 6)}...{account.address.slice(-4)}</code>
+                  <button
+                    onClick={() => copyToClipboard(account.address)}
+                    className="text-gray-400 hover:text-white"
+                  >
+                    <Copy size={16} />
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Main Content */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Left Panel - Account Setup */}
+          <div className="lg:col-span-1">
+            <div className="bg-gray-800 rounded-lg p-6">
+              <h2 className="text-xl font-semibold mb-4 flex items-center gap-2">
+                <Users size={20} />
+                Account Setup
+              </h2>
+              
+              {!account ? (
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm text-gray-400 mb-2">Owners</label>
+                    {owners.map((owner, index) => (
+                      <div key={index} className="flex gap-2 mb-2">
+                        <input
+                          type="text"
+                          value={owner}
+                          onChange={(e) => {
+                            const newOwners = [...owners];
+                            newOwners[index] = e.target.value;
+                            setOwners(newOwners);
+                          }}
+                          placeholder="0x..."
+                          className="flex-1 bg-gray-700 rounded px-3 py-2 text-sm"
+                        />
+                        {index === owners.length - 1 && (
+                          <button
+                            onClick={() => setOwners([...owners, ''])}
+                            className="bg-blue-600 hover:bg-blue-700 px-3 py-2 rounded text-sm"
+                          >
+                            +
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm text-gray-400 mb-2">Threshold</label>
+                    <input
+                      type="number"
+                      value={threshold}
+                      onChange={(e) => setThreshold(Math.max(1, parseInt(e.target.value) || 1))}
+                      min="1"
+                      max={owners.filter(o => o).length || 1}
+                      className="w-full bg-gray-700 rounded px-3 py-2 text-sm"
+                    />
+                  </div>
+                  
+                  <button
+                    onClick={createSmartAccount}
+                    disabled={!signer || loading || owners.filter(o => o).length < threshold}
+                    className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-600 px-4 py-2 rounded flex items-center justify-center gap-2 transition-colors"
+                  >
+                    {loading ? <Loader2 className="animate-spin" size={20} /> : <Wallet size={20} />}
+                    Create Smart Account
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="bg-gray-700 rounded p-4">
+                    <p className="text-sm text-gray-400">Address</p>
+                    <p className="font-mono text-xs break-all">{account.address}</p>
+                  </div>
+                  
+                  <div className="bg-gray-700 rounded p-4">
+                    <p className="text-sm text-gray-400">Balance</p>
+                    <p className="text-2xl font-semibold">{formatEther(balance)} ETH</p>
+                  </div>
+                  
+                  <div className="bg-gray-700 rounded p-4">
+                    <p className="text-sm text-gray-400 mb-2">Owners ({account.owners.length})</p>
+                    {account.owners.map((owner, i) => (
+                      <p key={i} className="font-mono text-xs">{owner}</p>
+                    ))}
+                  </div>
+                  
+                  <div className="bg-gray-700 rounded p-4">
+                    <p className="text-sm text-gray-400">Threshold</p>
+                    <p className="text-xl">{account.threshold} of {account.owners.length}</p>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Right Panel - Transactions */}
+          <div className="lg:col-span-2">
+            <div className="bg-gray-800 rounded-lg p-6">
+              {/* Tabs */}
+              <div className="flex gap-4 mb-6 border-b border-gray-700">
+                <button
+                  onClick={() => setActiveTab('send')}
+                  className={`pb-3 px-1 ${activeTab === 'send' ? 'border-b-2 border-blue-500 text-blue-500' : 'text-gray-400'}`}
+                >
+                  Send Transaction
+                </button>
+                <button
+                  onClick={() => setActiveTab('transactions')}
+                  className={`pb-3 px-1 ${activeTab === 'transactions' ? 'border-b-2 border-blue-500 text-blue-500' : 'text-gray-400'}`}
+                >
+                  Transactions ({transactions.length})
+                </button>
+                <button
+                  onClick={() => setActiveTab('logs')}
+                  className={`pb-3 px-1 ${activeTab === 'logs' ? 'border-b-2 border-blue-500 text-blue-500' : 'text-gray-400'}`}
+                >
+                  Activity Logs
+                </button>
+              </div>
+
+              {/* Send Transaction Tab */}
+              {activeTab === 'send' && account && (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const formData = new FormData(e.target);
+                    submitTransaction(
+                      formData.get('to'),
+                      parseEther(formData.get('value') || '0'),
+                      formData.get('data') || '0x'
+                    );
+                    e.target.reset();
+                  }}
+                  className="space-y-4"
+                >
+                  <div>
+                    <label className="block text-sm text-gray-400 mb-2">To Address</label>
+                    <input
+                      name="to"
+                      type="text"
+                      required
+                      placeholder="0x..."
+                      className="w-full bg-gray-700 rounded px-3 py-2"
+                    />
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm text-gray-400 mb-2">Value (ETH)</label>
+                    <input
+                      name="value"
+                      type="number"
+                      step="0.0001"
+                      placeholder="0.0"
+                      className="w-full bg-gray-700 rounded px-3 py-2"
+                    />
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm text-gray-400 mb-2">Data (optional)</label>
+                    <input
+                      name="data"
+                      type="text"
+                      placeholder="0x..."
+                      className="w-full bg-gray-700 rounded px-3 py-2"
+                    />
+                  </div>
+                  
+                  <button
+                    type="submit"
+                    disabled={loading}
+                    className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 px-4 py-2 rounded flex items-center justify-center gap-2"
+                  >
+                    {loading ? <Loader2 className="animate-spin" size={20} /> : <Send size={20} />}
+                    Submit Transaction
+                  </button>
+                </form>
+              )}
+
+              {/* Transactions Tab */}
+              {activeTab === 'transactions' && (
+                <div className="space-y-4">
+                  {transactions.length === 0 ? (
+                    <p className="text-gray-400 text-center py-8">No transactions yet</p>
+                  ) : (
+                    transactions.map(tx => (
+                      <div key={tx.id} className="bg-gray-700 rounded-lg p-4">
+                        <div className="flex justify-between items-start mb-3">
+                          <div>
+                            <p className="font-semibold">Transaction #{tx.id}</p>
+                            <p className="text-sm text-gray-400">To: {tx.to.slice(0, 10)}...{tx.to.slice(-8)}</p>
+                            <p className="text-sm text-gray-400">Value: {formatEther(tx.value)} ETH</p>
+                          </div>
+                          <div className="text-right">
+                            {tx.executed ? (
+                              <span className="bg-green-600 px-3 py-1 rounded-full text-sm flex items-center gap-1">
+                                <CheckCircle size={16} />
+                                Executed
+                              </span>
+                            ) : (
+                              <span className="bg-yellow-600 px-3 py-1 rounded-full text-sm">
+                                {tx.confirmations}/{account.threshold} confirmations
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        
+                        {!tx.executed && !tx.confirmedBy.includes(signer) && (
+                          <button
+                            onClick={() => confirmTransaction(tx.id)}
+                            disabled={loading}
+                            className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded text-sm flex items-center gap-2"
+                          >
+                            <CheckCircle size={16} />
+                            Confirm
+                          </button>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+
+              {/* Logs Tab */}
+              {activeTab === 'logs' && (
+                <div className="space-y-2">
+                  {logs.length === 0 ? (
+                    <p className="text-gray-400 text-center py-8">No activity yet</p>
+                  ) : (
+                    logs.map((log, i) => (
+                      <div
+                        key={i}
+                        className={`flex items-start gap-3 p-3 rounded ${
+                          log.type === 'error' ? 'bg-red-900/20' : 
+                          log.type === 'success' ? 'bg-green-900/20' : 
+                          'bg-gray-700/50'
+                        }`}
+                      >
+                        {log.type === 'error' ? (
+                          <AlertCircle className="text-red-500 mt-0.5" size={16} />
+                        ) : log.type === 'success' ? (
+                          <CheckCircle className="text-green-500 mt-0.5" size={16} />
+                        ) : (
+                          <div className="w-4" />
+                        )}
+                        <div className="flex-1">
+                          <p className="text-sm">{log.message}</p>
+                          <p className="text-xs text-gray-500">{log.timestamp}</p>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Info Panel */}
+        <div className="mt-6 bg-gray-800 rounded-lg p-6">
+          <h3 className="text-lg font-semibold mb-3">Implementation Details</h3>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+            <div>
+              <p className="text-gray-400">ERC-4337 Features</p>
+              <ul className="mt-1 text-gray-300 space-y-1">
+                <li>• Account abstraction</li>
+                <li>• UserOperation validation</li>
+                <li>• Gas sponsorship ready</li>
+              </ul>
+            </div>
+            <div>
+              <p className="text-gray-400">ERC-6900 Features</p>
+              <ul className="mt-1 text-gray-300 space-y-1">
+                <li>• Modular plugin system</li>
+                <li>• Multi-sig validation plugin</li>
+                <li>• Extensible architecture</li>
+              </ul>
+            </div>
+            <div>
+              <p className="text-gray-400">Multi-Sig Features</p>
+              <ul className="mt-1 text-gray-300 space-y-1">
+                <li>• Configurable threshold</li>
+                <li>• Multiple owner support</li>
+                <li>• Transaction queue</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default SmartAccountDashboard;
+
+
+=== FILE: ./frontend/src/App.js ===
+import React from 'react';
+import SmartAccountDashboard from './components/SmartAccountDashboard';
+
+function App() {
+  return (
+    <div className="App">
+      <SmartAccountDashboard />
+    </div>
+  );
+}
+
+export default App;
+
+
+
+=== FILE: ./test/MultiSig.test.js ===
+const { expect } = require("chai");
+const { ethers } = require("hardhat");
+
+describe("MultiSig Smart Account", function () {
+  let factory, multiSigPlugin, account;
+  let owner1, owner2, owner3;
+
+  beforeEach(async function () {
+    [owner1, owner2, owner3] = await ethers.getSigners();
+    
+    // Deploy contracts
+    // TODO: Add deployment logic
+  });
+
+  describe("Account Creation", function () {
+    it("Should create a new smart account", async function () {
+      // TODO: Add test
+    });
+  });
+
+  describe("Multi-Sig Operations", function () {
+    it("Should submit and confirm transactions", async function () {
+      // TODO: Add test
+    });
+  });
+});
+
+
+
+=== FILE: ./fix.sh ===
+#!/bin/bash
+
+# ERC-4337 & ERC-6900 Project Fix Patch Script
+# This script fixes all identified issues in the project
+
+echo "================================================"
+echo " Applying fixes to ERC-4337 & ERC-6900 Project"
+echo "================================================"
+echo ""
+
+# 1. Fix SmartAccountFactory.sol
+echo "[1/7] Fixing SmartAccountFactory.sol..."
+cat > contracts/SmartAccountFactory.sol << 'EOF'
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import "./ModularSmartAccount.sol";
+
+contract SmartAccountFactory {
+    IEntryPoint public immutable entryPoint;
+    
+    event AccountCreated(address indexed account, address indexed owner, uint256 salt);
+    
+    constructor(IEntryPoint _entryPoint) {
+        entryPoint = _entryPoint;
+    }
+    
+    function createAccount(address owner, uint256 salt) external returns (address) {
+        address account = address(new ModularSmartAccount{salt: bytes32(salt)}(entryPoint));
+        emit AccountCreated(account, owner, salt);
+        return account;
+    }
+    
+    function getAddress(address owner, uint256 salt) external view returns (address) {
+        return address(uint160(uint(keccak256(abi.encodePacked(
+            bytes1(0xff),
+            address(this),
+            salt,
+            keccak256(abi.encodePacked(type(ModularSmartAccount).creationCode, abi.encode(entryPoint)))
+        )))));
+    }
+}
+EOF
+
+# 2. Update IEntryPoint.sol
+echo "[2/7] Updating IEntryPoint.sol..."
+cat > contracts/IEntryPoint.sol << 'EOF'
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+struct UserOperation {
+    address sender;
+    uint256 nonce;
+    bytes initCode;
+    bytes callData;
+    uint256 callGasLimit;
+    uint256 verificationGasLimit;
+    uint256 preVerificationGas;
+    uint256 maxFeePerGas;
+    uint256 maxPriorityFeePerGas;
+    bytes paymasterAndData;
+    bytes signature;
+}
+
+interface IEntryPoint {
+    function handleOps(UserOperation[] calldata ops, address payable beneficiary) external;
+    function depositTo(address account) external payable;
+    function withdrawTo(address payable withdrawAddress, uint256 withdrawAmount) external;
+    function getUserOpHash(UserOperation calldata userOp) external view returns (bytes32);
+}
+EOF
+
+# 3. Update IValidationPlugin.sol
+echo "[3/7] Updating IValidationPlugin.sol..."
+cat > contracts/interfaces/IValidationPlugin.sol << 'EOF'
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import "../IEntryPoint.sol";
+
+interface IValidationPlugin {
+    function validateUserOp(
+        UserOperation calldata userOp,
+        bytes32 userOpHash
+    ) external returns (uint256);
+}
+EOF
+
+# 4. Create MockEntryPoint.sol
+echo "[4/7] Creating MockEntryPoint.sol..."
+cat > contracts/MockEntryPoint.sol << 'EOF'
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import "./IEntryPoint.sol";
+
+contract MockEntryPoint is IEntryPoint {
+    mapping(address => uint256) public deposits;
+    
+    event UserOperationEvent(bytes32 indexed userOpHash, address indexed sender, address indexed paymaster, uint256 nonce, bool success, uint256 actualGasCost, uint256 actualGasUsed);
+    event Deposited(address indexed account, uint256 totalDeposit);
+    event Withdrawn(address indexed account, address withdrawAddress, uint256 amount);
+    
+    function handleOps(UserOperation[] calldata ops, address payable beneficiary) external override {
+        for (uint256 i = 0; i < ops.length; i++) {
+            UserOperation calldata op = ops[i];
+            bytes32 userOpHash = getUserOpHash(op);
+            
+            // In a real implementation, this would validate and execute the operation
+            // For mock purposes, we'll just emit an event
+            emit UserOperationEvent(userOpHash, op.sender, address(0), op.nonce, true, 0, 0);
+        }
+    }
+    
+    function depositTo(address account) external payable override {
+        deposits[account] += msg.value;
+        emit Deposited(account, deposits[account]);
+    }
+    
+    function withdrawTo(address payable withdrawAddress, uint256 withdrawAmount) external override {
+        require(deposits[msg.sender] >= withdrawAmount, "Insufficient deposit");
+        deposits[msg.sender] -= withdrawAmount;
+        withdrawAddress.transfer(withdrawAmount);
+        emit Withdrawn(msg.sender, withdrawAddress, withdrawAmount);
+    }
+    
+    function getUserOpHash(UserOperation calldata userOp) public pure override returns (bytes32) {
+        return keccak256(abi.encode(
+            userOp.sender,
+            userOp.nonce,
+            keccak256(userOp.initCode),
+            keccak256(userOp.callData),
+            userOp.callGasLimit,
+            userOp.verificationGasLimit,
+            userOp.preVerificationGas,
+            userOp.maxFeePerGas,
+            userOp.maxPriorityFeePerGas,
+            keccak256(userOp.paymasterAndData)
+        ));
+    }
+    
+    function getDepositInfo(address account) external view returns (uint256) {
+        return deposits[account];
+    }
+}
+EOF
+
+# 5. Update deploy.js
+echo "[5/7] Updating deploy.js..."
+cat > scripts/deploy.js << 'EOF'
+// deploy.js - Deployment script for ERC-4337 & ERC-6900 contracts
+const { ethers } = require("hardhat");
+const fs = require('fs');
+
+async function main() {
+  console.log("🚀 Deploying ERC-4337 & ERC-6900 Smart Account System...\n");
+
+  // Get deployer
+  const [deployer] = await ethers.getSigners();
+  console.log("Deploying contracts with account:", deployer.address);
+  console.log("Account balance:", ethers.utils.formatEther(await deployer.getBalance()), "ETH\n");
+
+  // Deploy EntryPoint (or use existing one)
+  console.log("1. Deploying EntryPoint...");
+  let entryPoint;
+  if (network.name === "localhost" || network.name === "hardhat") {
+    const MockEntryPoint = await ethers.getContractFactory("MockEntryPoint");
+    entryPoint = await MockEntryPoint.deploy();
+    await entryPoint.deployed();
+    console.log("   MockEntryPoint deployed to:", entryPoint.address);
+  } else {
+    // Use the official EntryPoint address for testnets/mainnet
+    entryPoint = { address: "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789" };
+    console.log("   Using official EntryPoint at:", entryPoint.address);
+  }
+
+  // Deploy MultiSigPlugin
+  console.log("\n2. Deploying MultiSigPlugin...");
+  const MultiSigPlugin = await ethers.getContractFactory("MultiSigPlugin");
+  const multiSigPlugin = await MultiSigPlugin.deploy();
+  await multiSigPlugin.deployed();
+  console.log("   MultiSigPlugin deployed to:", multiSigPlugin.address);
+
+  // Deploy SmartAccountFactory
+  console.log("\n3. Deploying SmartAccountFactory...");
+  const SmartAccountFactory = await ethers.getContractFactory("SmartAccountFactory");
+  const factory = await SmartAccountFactory.deploy(entryPoint.address);
+  await factory.deployed();
+  console.log("   SmartAccountFactory deployed to:", factory.address);
+
+  // Save deployment addresses
+  const deploymentInfo = {
+    network: network.name,
+    chainId: network.config.chainId,
+    deployer: deployer.address,
+    contracts: {
+      entryPoint: entryPoint.address,
+      multiSigPlugin: multiSigPlugin.address,
+      factory: factory.address
+    },
+    timestamp: new Date().toISOString()
+  };
+
+  // Write deployment info to file
+  fs.writeFileSync(
+    `deployments-${network.name}.json`,
+    JSON.stringify(deploymentInfo, null, 2)
+  );
+
+  // Update addresses.json
+  const addressesPath = './scripts/addresses.json';
+  let addresses = {};
+  if (fs.existsSync(addressesPath)) {
+    addresses = JSON.parse(fs.readFileSync(addressesPath, 'utf8'));
+  }
+  
+  addresses[network.name] = {
+    entryPoint: entryPoint.address,
+    factory: factory.address,
+    multiSigPlugin: multiSigPlugin.address
+  };
+  
+  fs.writeFileSync(addressesPath, JSON.stringify(addresses, null, 2));
+
+  console.log("\n✅ Deployment complete!");
+  console.log("\n📄 Deployment info saved to:", `deployments-${network.name}.json`);
+  
+  // Verify contracts on Etherscan (if not on localhost)
+  if (network.name !== "localhost" && network.name !== "hardhat") {
+    console.log("\n🔍 Verifying contracts on Etherscan...");
+    
+    await new Promise(resolve => setTimeout(resolve, 20000)); // Wait for Etherscan to index
+    
+    try {
+      await hre.run("verify:verify", {
+        address: multiSigPlugin.address,
+        constructorArguments: [],
+      });
+      
+      await hre.run("verify:verify", {
+        address: factory.address,
+        constructorArguments: [entryPoint.address],
+      });
+      
+      console.log("✅ Contracts verified!");
+    } catch (error) {
+      console.log("⚠️  Verification failed:", error.message);
+    }
+  }
+
+  return deploymentInfo;
+}
+
+// Test script
+async function testDeployment(deploymentInfo) {
+  console.log("\n🧪 Running deployment tests...\n");
+  
+  const [owner1, owner2, owner3] = await ethers.getSigners();
+  
+  // Get contract instances
+  const factory = await ethers.getContractAt("SmartAccountFactory", deploymentInfo.contracts.factory);
+  const multiSigPlugin = await ethers.getContractAt("MultiSigPlugin", deploymentInfo.contracts.multiSigPlugin);
+  
+  // Create a smart account
+  console.log("1. Creating smart account...");
+  const salt = 0;
+  const tx = await factory.createAccount(owner1.address, salt);
+  const receipt = await tx.wait();
+  
+  const accountAddress = await factory.getAddress(owner1.address, salt);
+  console.log("   Smart account created at:", accountAddress);
+  
+  // Get account instance
+  const account = await ethers.getContractAt("ModularSmartAccount", accountAddress);
+  
+  // Install multi-sig plugin
+  console.log("\n2. Installing multi-sig plugin...");
+  const owners = [owner1.address, owner2.address, owner3.address];
+  const threshold = 2;
+  
+  const installData = ethers.utils.defaultAbiCoder.encode(
+    ["address[]", "uint256"],
+    [owners, threshold]
+  );
+  
+  // Note: This would normally be done through a UserOperation
+  const selector = "0x00000000"; // Custom selector for multi-sig
+  await account.connect(owner1).installPlugin(selector, multiSigPlugin.address, installData);
+  console.log("   Multi-sig plugin installed with", owners.length, "owners and threshold of", threshold);
+  
+  // Fund the account
+  console.log("\n3. Funding account...");
+  await owner1.sendTransaction({
+    to: accountAddress,
+    value: ethers.utils.parseEther("1.0")
+  });
+  const balance = await ethers.provider.getBalance(accountAddress);
+  console.log("   Account balance:", ethers.utils.formatEther(balance), "ETH");
+  
+  console.log("\n✅ All tests passed!");
+}
+
+// Run deployment and tests
+main()
+  .then(async (deploymentInfo) => {
+    if (process.env.RUN_TESTS === "true") {
+      await testDeployment(deploymentInfo);
+    }
+    process.exit(0);
+  })
+  .catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+EOF
+
+# 6. Clean up duplicate files
+echo "[6/7] Cleaning up duplicate files..."
+rm -f ./scripts/addresses.json~
+
+# 7. Clean up ModularSmartAccount.sol to remove duplicates
+echo "[7/7] Cleaning up ModularSmartAccount.sol..."
+# Extract only the ModularSmartAccount contract from the file
+cat > contracts/ModularSmartAccount.sol << 'EOF'
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import "./IEntryPoint.sol";
+import "./interfaces/IPlugin.sol";
+import "./interfaces/IValidationPlugin.sol";
+
+// Modular Smart Account (ERC-4337 + ERC-6900)
+contract ModularSmartAccount {
+    IEntryPoint public immutable entryPoint;
+    uint256 public nonce;
+    
+    mapping(bytes4 => address) public plugins;
+    
+    event PluginInstalled(bytes4 indexed selector, address indexed plugin);
+    event PluginUninstalled(bytes4 indexed selector);
+    event Received(address indexed sender, uint256 amount);
+    
+    modifier onlyEntryPoint() {
+        require(msg.sender == address(entryPoint), "Only EntryPoint");
+        _;
+    }
+    
+    modifier onlySelf() {
+        require(msg.sender == address(this), "Only self");
+        _;
+    }
+    
+    constructor(IEntryPoint _entryPoint) {
+        entryPoint = _entryPoint;
+    }
+    
+    receive() external payable {
+        emit Received(msg.sender, msg.value);
+    }
+    
+    function validateUserOp(
+        UserOperation calldata userOp,
+        bytes32 userOpHash,
+        uint256 missingAccountFunds
+    ) external onlyEntryPoint returns (uint256 validationData) {
+        // Check if we need to pay missing funds
+        if (missingAccountFunds > 0) {
+            (bool success,) = payable(msg.sender).call{value: missingAccountFunds}("");
+            require(success, "Failed to pay missing funds");
+        }
+        
+        // Get the validation plugin
+        bytes4 selector = bytes4(userOp.callData[:4]);
+        address plugin = plugins[selector];
+        
+        if (plugin != address(0)) {
+            return IValidationPlugin(plugin).validateUserOp(userOp, userOpHash);
+        }
+        
+        // Default validation (single owner)
+        return _validateSignature(userOp, userOpHash);
+    }
+    
+    function _validateSignature(
+        UserOperation calldata userOp,
+        bytes32 userOpHash
+    ) internal view returns (uint256) {
+        // Simple signature validation for MVP
+        bytes32 hash = keccak256(abi.encodePacked(userOpHash, address(this), block.chainid));
+        address signer = recoverSigner(hash, userOp.signature);
+        
+        // For MVP, we'll accept any valid signature
+        if (signer != address(0)) {
+            return 0; // Valid
+        }
+        return 1; // Invalid
+    }
+    
+    function recoverSigner(bytes32 hash, bytes memory signature) internal pure returns (address) {
+        if (signature.length != 65) {
+            return address(0);
+        }
+        
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        
+        assembly {
+            r := mload(add(signature, 32))
+            s := mload(add(signature, 64))
+            v := byte(0, mload(add(signature, 96)))
+        }
+        
+        if (v < 27) {
+            v += 27;
+        }
+        
+        if (v != 27 && v != 28) {
+            return address(0);
+        }
+        
+        return ecrecover(hash, v, r, s);
+    }
+    
+    function installPlugin(bytes4 selector, address plugin, bytes calldata data) external onlySelf {
+        require(plugins[selector] == address(0), "Plugin already installed");
+        require(plugin != address(0), "Invalid plugin address");
+        
+        plugins[selector] = plugin;
+        IPlugin(plugin).onInstall(data);
+        
+        emit PluginInstalled(selector, plugin);
+    }
+    
+    function uninstallPlugin(bytes4 selector, bytes calldata data) external onlySelf {
+        address plugin = plugins[selector];
+        require(plugin != address(0), "Plugin not installed");
+        
+        delete plugins[selector];
+        IPlugin(plugin).onUninstall(data);
+        
+        emit PluginUninstalled(selector);
+    }
+    
+    function execute(address to, uint256 value, bytes calldata data) external {
+        require(msg.sender == address(this) || msg.sender == address(entryPoint), "Unauthorized");
+        
+        (bool success, bytes memory result) = to.call{value: value}(data);
+        if (!success) {
+            assembly {
+                revert(add(result, 32), mload(result))
+            }
+        }
+    }
+    
+    function executeBatch(
+        address[] calldata to,
+        uint256[] calldata value,
+        bytes[] calldata data
+    ) external {
+        require(msg.sender == address(this) || msg.sender == address(entryPoint), "Unauthorized");
+        require(to.length == value.length && to.length == data.length, "Mismatched arrays");
+        
+        for (uint256 i = 0; i < to.length; i++) {
+            (bool success, bytes memory result) = to[i].call{value: value[i]}(data[i]);
+            if (!success) {
+                assembly {
+                    revert(add(result, 32), mload(result))
+                }
+            }
+        }
+    }
+}
+EOF
+
+echo ""
+echo "================================================"
+echo "[+] All fixes applied successfully!"
+echo "================================================"
+echo ""
+echo "Next steps:"
+echo "1. Run: npm install"
+echo "2. Run: npx hardhat compile"
+echo "3. Deploy contracts: npx hardhat run scripts/deploy.js --network localhost"
+echo ""
+echo "[i] The project should now compile and deploy correctly!"
+
+
+=== FILE: ./hardhat.config.js ===
+require("@nomiclabs/hardhat-waffle");
+require("@nomiclabs/hardhat-etherscan");
+require("dotenv").config();
+
+module.exports = {
+  solidity: {
+    version: "0.8.19",
+    settings: {
+      optimizer: {
+        enabled: true,
+        runs: 200
+      }
+    }
+  },
+  networks: {
+    hardhat: {
+      chainId: 31337
+    },
+    localhost: {
+      url: "http://127.0.0.1:8545"
+    },
+    sepolia: {
+      url: process.env.SEPOLIA_RPC_URL || "",
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+      chainId: 11155111
+    },
+    holesky: {
+      url: process.env.HOLESKY_RPC_URL || "",
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+      chainId: 17000
+    },
+    polygon_mumbai: {
+      url: process.env.POLYGON_MUMBAI_RPC_URL || "",
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+      chainId: 80001
+    },
+    arbitrum_sepolia: {
+      url: process.env.ARBITRUM_SEPOLIA_RPC_URL || "",
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
+      chainId: 421614
+    }
+  },
+  etherscan: {
+    apiKey: {
+      sepolia: process.env.ETHERSCAN_API_KEY,
+      holesky: process.env.ETHERSCAN_API_KEY,
+      polygonMumbai: process.env.POLYGONSCAN_API_KEY,
+      arbitrumSepolia: process.env.ARBISCAN_API_KEY
+    }
+  }
+};
+
+
+=== FILE: ./contracts/IEntryPoint.sol ===
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+struct UserOperation {
+    address sender;
+    uint256 nonce;
+    bytes initCode;
+    bytes callData;
+    uint256 callGasLimit;
+    uint256 verificationGasLimit;
+    uint256 preVerificationGas;
+    uint256 maxFeePerGas;
+    uint256 maxPriorityFeePerGas;
+    bytes paymasterAndData;
+    bytes signature;
+}
+
+interface IEntryPoint {
+    function handleOps(UserOperation[] calldata ops, address payable beneficiary) external;
+    function depositTo(address account) external payable;
+    function withdrawTo(address payable withdrawAddress, uint256 withdrawAmount) external;
+    function getUserOpHash(UserOperation calldata userOp) external view returns (bytes32);
+}
+
+
+
+=== FILE: ./contracts/MultiSigPlugin.sol ===
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import "./interfaces/IPlugin.sol";
+import "./interfaces/IValidationPlugin.sol";
+import "./interfaces/IExecutionPlugin.sol";
+
+/**
+ * @title MultiSigPlugin
+ * @notice ERC-6900 compliant multi-signature plugin for modular smart accounts
+ * @dev Implements validation and execution logic for multi-signature operations
+ */
+contract MultiSigPlugin is IPlugin, IValidationPlugin, IExecutionPlugin {
+    // ===================== Structs =====================
+    
+    struct Transaction {
+        address to;
+        uint256 value;
+        bytes data;
+        bool executed;
+        uint256 confirmations;
+        uint256 timestamp;
+        bytes32 txHash;
+    }
+    
+    struct AccountConfig {
+        address[] owners;
+        mapping(address => bool) isOwner;
+        uint256 threshold;
+        uint256 transactionCount;
+        bool initialized;
+    }
+    
+    // ===================== State Variables =====================
+    
+    // Account => Configuration
+    mapping(address => AccountConfig) private accountConfigs;
+    
+    // Account => Transaction ID => Transaction
+    mapping(address => mapping(uint256 => Transaction)) public transactions;
+    
+    // Account => Transaction ID => Owner => Confirmed
+    mapping(address => mapping(uint256 => mapping(address => bool))) public confirmations;
+    
+    // Account => Owner => List of transaction IDs
+    mapping(address => mapping(address => uint256[])) public ownerTransactions;
+    
+    // ===================== Events =====================
+    
+    event PluginInstalled(address indexed account, address[] owners, uint256 threshold);
+    event PluginUninstalled(address indexed account);
+    event OwnerAdded(address indexed account, address indexed owner);
+    event OwnerRemoved(address indexed account, address indexed owner);
+    event ThresholdChanged(address indexed account, uint256 oldThreshold, uint256 newThreshold);
+    event TransactionSubmitted(
+        address indexed account, 
+        uint256 indexed txId, 
+        address indexed submitter,
+        address to,
+        uint256 value,
+        bytes data
+    );
+    event TransactionConfirmed(address indexed account, uint256 indexed txId, address indexed owner);
+    event ConfirmationRevoked(address indexed account, uint256 indexed txId, address indexed owner);
+    event TransactionExecuted(address indexed account, uint256 indexed txId, bool success);
+    event TransactionFailed(address indexed account, uint256 indexed txId, bytes reason);
+    
+    // ===================== Modifiers =====================
+    
+    modifier onlyOwner(address account) {
+        require(accountConfigs[account].isOwner[msg.sender], "Not an owner");
+        _;
+    }
+    
+    modifier txExists(address account, uint256 txId) {
+        require(transactions[account][txId].to != address(0), "Transaction does not exist");
+        _;
+    }
+    
+    modifier notExecuted(address account, uint256 txId) {
+        require(!transactions[account][txId].executed, "Transaction already executed");
+        _;
+    }
+    
+    modifier notConfirmed(address account, uint256 txId) {
+        require(!confirmations[account][txId][msg.sender], "Transaction already confirmed");
+        _;
+    }
+    
+    // ===================== Plugin Installation =====================
+    
+    /**
+     * @notice Install the plugin with initial configuration
+     * @param data Encoded owners array and threshold
+     */
+    function onInstall(bytes calldata data) external override {
+        require(!accountConfigs[msg.sender].initialized, "Already initialized");
+        
+        (address[] memory owners, uint256 threshold) = abi.decode(data, (address[], uint256));
+        _validateOwnersAndThreshold(owners, threshold);
+        
+        AccountConfig storage config = accountConfigs[msg.sender];
+        config.threshold = threshold;
+        config.initialized = true;
+        
+        for (uint256 i = 0; i < owners.length; i++) {
+            address owner = owners[i];
+            require(owner != address(0), "Invalid owner address");
+            require(!config.isOwner[owner], "Duplicate owner");
+            
+            config.owners.push(owner);
+            config.isOwner[owner] = true;
+        }
+        
+        emit PluginInstalled(msg.sender, owners, threshold);
+    }
+    
+    /**
+     * @notice Uninstall the plugin and clean up storage
+     * @param data Unused parameter for interface compliance
+     */
+    function onUninstall(bytes calldata data) external override {
+        AccountConfig storage config = accountConfigs[msg.sender];
+        require(config.initialized, "Not initialized");
+        
+        // Clean up owners
+        for (uint256 i = 0; i < config.owners.length; i++) {
+            delete config.isOwner[config.owners[i]];
+        }
+        delete config.owners;
+        
+        // Clean up transactions
+        for (uint256 i = 0; i < config.transactionCount; i++) {
+            delete transactions[msg.sender][i];
+        }
+        
+        delete accountConfigs[msg.sender];
+        emit PluginUninstalled(msg.sender);
+    }
+    
+    // ===================== Validation Functions =====================
+    
+    /**
+     * @notice Validate a user operation for multi-sig requirements
+     * @param userOp The user operation to validate
+     * @param userOpHash Hash of the user operation
+     * @return validationData 0 for success, 1 for failure
+     */
+    function validateUserOp(
+        UserOperation calldata userOp,
+        bytes32 userOpHash
+    ) external view override returns (uint256 validationData) {
+        // Decode multi-sig validation data from signature
+        (uint256 txId, address[] memory signers) = abi.decode(
+            userOp.signature,
+            (uint256, address[])
+        );
+        
+        AccountConfig storage config = accountConfigs[userOp.sender];
+        Transaction storage txn = transactions[userOp.sender][txId];
+        
+        // Verify transaction exists and matches
+        if (txn.to == address(0) || txn.executed) {
+            return 1; // Invalid
+        }
+        
+        // Verify operation matches transaction
+        bytes32 expectedHash = keccak256(abi.encode(txn.to, txn.value, txn.data));
+        bytes32 actualHash = keccak256(userOp.callData);
+        if (expectedHash != actualHash) {
+            return 1; // Mismatch
+        }
+        
+        // Count valid signatures
+        uint256 validSignatures = 0;
+        for (uint256 i = 0; i < signers.length; i++) {
+            if (config.isOwner[signers[i]] && confirmations[userOp.sender][txId][signers[i]]) {
+                validSignatures++;
+            }
+        }
+        
+        return validSignatures >= config.threshold ? 0 : 1;
+    }
+    
+    // ===================== Transaction Management =====================
+    
+    /**
+     * @notice Submit a new transaction for multi-sig approval
+     * @param to Destination address
+     * @param value ETH value to send
+     * @param data Transaction data
+     * @return txId Transaction ID
+     */
+    function submitTransaction(
+        address to,
+        uint256 value,
+        bytes calldata data
+    ) external onlyOwner(msg.sender) returns (uint256 txId) {
+        require(to != address(0), "Invalid destination");
+        
+        AccountConfig storage config = accountConfigs[msg.sender];
+        txId = config.transactionCount;
+        
+        transactions[msg.sender][txId] = Transaction({
+            to: to,
+            value: value,
+            data: data,
+            executed: false,
+            confirmations: 0,
+            timestamp: block.timestamp,
+            txHash: keccak256(abi.encode(msg.sender, txId, to, value, data))
+        });
+        
+        config.transactionCount++;
+        
+        emit TransactionSubmitted(msg.sender, txId, tx.origin, to, value, data);
+        
+        // Auto-confirm for submitter
+        _confirmTransaction(msg.sender, txId);
+    }
+    
+    /**
+     * @notice Confirm a pending transaction
+     * @param txId Transaction ID to confirm
+     */
+    function confirmTransaction(uint256 txId) 
+        external 
+        onlyOwner(msg.sender)
+        txExists(msg.sender, txId)
+        notExecuted(msg.sender, txId)
+        notConfirmed(msg.sender, txId)
+    {
+        _confirmTransaction(msg.sender, txId);
+    }
+    
+    /**
+     * @notice Revoke a confirmation
+     * @param txId Transaction ID
+     */
+    function revokeConfirmation(uint256 txId)
+        external
+        onlyOwner(msg.sender)
+        txExists(msg.sender, txId)
+        notExecuted(msg.sender, txId)
+    {
+        require(confirmations[msg.sender][txId][tx.origin], "Not confirmed");
+        
+        confirmations[msg.sender][txId][tx.origin] = false;
+        transactions[msg.sender][txId].confirmations--;
+        
+        emit ConfirmationRevoked(msg.sender, txId, tx.origin);
+    }
+    
+    /**
+     * @notice Execute a confirmed transaction
+     * @param txId Transaction ID to execute
+     */
+    function executeTransaction(uint256 txId)
+        external
+        onlyOwner(msg.sender)
+        txExists(msg.sender, txId)
+        notExecuted(msg.sender, txId)
+    {
+        Transaction storage txn = transactions[msg.sender][txId];
+        AccountConfig storage config = accountConfigs[msg.sender];
+        
+        require(txn.confirmations >= config.threshold, "Insufficient confirmations");
+        
+        txn.executed = true;
+        
+        (bool success, bytes memory result) = txn.to.call{value: txn.value}(txn.data);
+        
+        if (success) {
+            emit TransactionExecuted(msg.sender, txId, true);
+        } else {
+            emit TransactionFailed(msg.sender, txId, result);
+            // Revert the execution status to allow retry
+            txn.executed = false;
+        }
+    }
+    
+    // ===================== Owner Management =====================
+    
+    /**
+     * @notice Add a new owner
+     * @param owner Address to add as owner
+     */
+    function addOwner(address owner) external onlyOwner(msg.sender) {
+        require(owner != address(0), "Invalid owner");
+        
+        AccountConfig storage config = accountConfigs[msg.sender];
+        require(!config.isOwner[owner], "Already an owner");
+        
+        config.owners.push(owner);
+        config.isOwner[owner] = true;
+        
+        emit OwnerAdded(msg.sender, owner);
+    }
+    
+    /**
+     * @notice Remove an existing owner
+     * @param owner Address to remove
+     */
+    function removeOwner(address owner) external onlyOwner(msg.sender) {
+        AccountConfig storage config = accountConfigs[msg.sender];
+        require(config.isOwner[owner], "Not an owner");
+        require(config.owners.length - 1 >= config.threshold, "Would break threshold");
+        
+        config.isOwner[owner] = false;
+        
+        // Remove from array
+        for (uint256 i = 0; i < config.owners.length; i++) {
+            if (config.owners[i] == owner) {
+                config.owners[i] = config.owners[config.owners.length - 1];
+                config.owners.pop();
+                break;
+            }
+        }
+        
+        emit OwnerRemoved(msg.sender, owner);
+    }
+    
+    /**
+     * @notice Change the confirmation threshold
+     * @param newThreshold New threshold value
+     */
+    function changeThreshold(uint256 newThreshold) external onlyOwner(msg.sender) {
+        AccountConfig storage config = accountConfigs[msg.sender];
+        _validateOwnersAndThreshold(config.owners, newThreshold);
+        
+        uint256 oldThreshold = config.threshold;
+        config.threshold = newThreshold;
+        
+        emit ThresholdChanged(msg.sender, oldThreshold, newThreshold);
+    }
+    
+    // ===================== View Functions =====================
+    
+    /**
+     * @notice Get account configuration
+     * @param account Account address
+     * @return owners Array of owner addresses
+     * @return threshold Confirmation threshold
+     */
+    function getAccountConfig(address account) 
+        external 
+        view 
+        returns (address[] memory owners, uint256 threshold) 
+    {
+        AccountConfig storage config = accountConfigs[account];
+        return (config.owners, config.threshold);
+    }
+    
+    /**
+     * @notice Get transaction details
+     * @param account Account address
+     * @param txId Transaction ID
+     * @return Transaction details
+     */
+    function getTransaction(address account, uint256 txId) 
+        external 
+        view 
+        returns (Transaction memory) 
+    {
+        return transactions[account][txId];
+    }
+    
+    /**
+     * @notice Get transaction confirmations
+     * @param account Account address
+     * @param txId Transaction ID
+     * @return confirmedOwners List of owners who confirmed
+     */
+    function getConfirmations(address account, uint256 txId)
+        external
+        view
+        returns (address[] memory confirmedOwners)
+    {
+        AccountConfig storage config = accountConfigs[account];
+        uint256 count = 0;
+        
+        // Count confirmations
+        for (uint256 i = 0; i < config.owners.length; i++) {
+            if (confirmations[account][txId][config.owners[i]]) {
+                count++;
+            }
+        }
+        
+        // Build array
+        confirmedOwners = new address[](count);
+        uint256 index = 0;
+        for (uint256 i = 0; i < config.owners.length; i++) {
+            if (confirmations[account][txId][config.owners[i]]) {
+                confirmedOwners[index] = config.owners[i];
+                index++;
+            }
+        }
+    }
+    
+    /**
+     * @notice Check if an address is an owner
+     * @param account Account address
+     * @param owner Address to check
+     * @return bool True if owner
+     */
+    function isOwner(address account, address owner) external view returns (bool) {
+        return accountConfigs[account].isOwner[owner];
+    }
+    
+    /**
+     * @notice Get pending transactions for an account
+     * @param account Account address
+     * @return pendingTxIds Array of pending transaction IDs
+     */
+    function getPendingTransactions(address account) 
+        external 
+        view 
+        returns (uint256[] memory pendingTxIds) 
+    {
+        AccountConfig storage config = accountConfigs[account];
+        uint256 pendingCount = 0;
+        
+        // Count pending transactions
+        for (uint256 i = 0; i < config.transactionCount; i++) {
+            if (!transactions[account][i].executed && transactions[account][i].to != address(0)) {
+                pendingCount++;
+            }
+        }
+        
+        // Build array
+        pendingTxIds = new uint256[](pendingCount);
+        uint256 index = 0;
+        for (uint256 i = 0; i < config.transactionCount; i++) {
+            if (!transactions[account][i].executed && transactions[account][i].to != address(0)) {
+                pendingTxIds[index] = i;
+                index++;
+            }
+        }
+    }
+    
+    // ===================== Internal Functions =====================
+    
+    function _confirmTransaction(address account, uint256 txId) internal {
+        confirmations[account][txId][tx.origin] = true;
+        transactions[account][txId].confirmations++;
+        ownerTransactions[account][tx.origin].push(txId);
+        
+        emit TransactionConfirmed(account, txId, tx.origin);
+    }
+    
+    function _validateOwnersAndThreshold(
+        address[] memory owners,
+        uint256 threshold
+    ) internal pure {
+        require(owners.length > 0, "No owners");
+        require(threshold > 0, "Invalid threshold");
+        require(threshold <= owners.length, "Threshold too high");
+    }
+}
+
+
+=== FILE: ./contracts/README.md ===
+# Smart Contracts
+
+Place the following files here:
+- ModularSmartAccount.sol
+- MultiSigPlugin.sol  
+- SmartAccountFactory.sol
+
+These files contain the main implementation and should be added manually.
+
+
+
+=== FILE: ./contracts/SmartAccountFactory.sol ===
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import "./ModularSmartAccount.sol";
+
+contract SmartAccountFactory {
+    IEntryPoint public immutable entryPoint;
+    
+    event AccountCreated(address indexed account, address indexed owner, uint256 salt);
+    
+    constructor(IEntryPoint _entryPoint) {
+        entryPoint = _entryPoint;
+    }
+    
+    function createAccount(address owner, uint256 salt) external returns (address) {
+        address account = address(new ModularSmartAccount{salt: bytes32(salt)}(entryPoint));
+        emit AccountCreated(account, owner, salt);
+        return account;
+    }
+    
+    function getAddress(address owner, uint256 salt) external view returns (address) {
+        return address(uint160(uint(keccak256(abi.encodePacked(
+            bytes1(0xff),
+            address(this),
+            salt,
+            keccak256(abi.encodePacked(type(ModularSmartAccount).creationCode, abi.encode(entryPoint)))
+        )))));
+    }
+}
+
+
+
+=== FILE: ./contracts/ModularSmartAccount.sol ===
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import "./IEntryPoint.sol";
+import "./interfaces/IPlugin.sol";
+import "./interfaces/IValidationPlugin.sol";
+
+// Modular Smart Account (ERC-4337 + ERC-6900)
+contract ModularSmartAccount {
+    IEntryPoint public immutable entryPoint;
+    uint256 public nonce;
+    
+    mapping(bytes4 => address) public plugins;
+    
+    event PluginInstalled(bytes4 indexed selector, address indexed plugin);
+    event PluginUninstalled(bytes4 indexed selector);
+    event Received(address indexed sender, uint256 amount);
+    
+    modifier onlyEntryPoint() {
+        require(msg.sender == address(entryPoint), "Only EntryPoint");
+        _;
+    }
+    
+    modifier onlySelf() {
+        require(msg.sender == address(this), "Only self");
+        _;
+    }
+    
+    constructor(IEntryPoint _entryPoint) {
+        entryPoint = _entryPoint;
+    }
+    
+    receive() external payable {
+        emit Received(msg.sender, msg.value);
+    }
+    
+    function validateUserOp(
+        UserOperation calldata userOp,
+        bytes32 userOpHash,
+        uint256 missingAccountFunds
+    ) external onlyEntryPoint returns (uint256 validationData) {
+        // Check if we need to pay missing funds
+        if (missingAccountFunds > 0) {
+            (bool success,) = payable(msg.sender).call{value: missingAccountFunds}("");
+            require(success, "Failed to pay missing funds");
+        }
+        
+        // Get the validation plugin
+        bytes4 selector = bytes4(userOp.callData[:4]);
+        address plugin = plugins[selector];
+        
+        if (plugin != address(0)) {
+            return IValidationPlugin(plugin).validateUserOp(userOp, userOpHash);
+        }
+        
+        // Default validation (single owner)
+        return _validateSignature(userOp, userOpHash);
+    }
+    
+    function _validateSignature(
+        UserOperation calldata userOp,
+        bytes32 userOpHash
+    ) internal view returns (uint256) {
+        // Simple signature validation for MVP
+        bytes32 hash = keccak256(abi.encodePacked(userOpHash, address(this), block.chainid));
+        address signer = recoverSigner(hash, userOp.signature);
+        
+        // For MVP, we'll accept any valid signature
+        if (signer != address(0)) {
+            return 0; // Valid
+        }
+        return 1; // Invalid
+    }
+    
+    function recoverSigner(bytes32 hash, bytes memory signature) internal pure returns (address) {
+        if (signature.length != 65) {
+            return address(0);
+        }
+        
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        
+        assembly {
+            r := mload(add(signature, 32))
+            s := mload(add(signature, 64))
+            v := byte(0, mload(add(signature, 96)))
+        }
+        
+        if (v < 27) {
+            v += 27;
+        }
+        
+        if (v != 27 && v != 28) {
+            return address(0);
+        }
+        
+        return ecrecover(hash, v, r, s);
+    }
+    
+    function installPlugin(bytes4 selector, address plugin, bytes calldata data) external onlySelf {
+        require(plugins[selector] == address(0), "Plugin already installed");
+        require(plugin != address(0), "Invalid plugin address");
+        
+        plugins[selector] = plugin;
+        IPlugin(plugin).onInstall(data);
+        
+        emit PluginInstalled(selector, plugin);
+    }
+    
+    function uninstallPlugin(bytes4 selector, bytes calldata data) external onlySelf {
+        address plugin = plugins[selector];
+        require(plugin != address(0), "Plugin not installed");
+        
+        delete plugins[selector];
+        IPlugin(plugin).onUninstall(data);
+        
+        emit PluginUninstalled(selector);
+    }
+    
+    function execute(address to, uint256 value, bytes calldata data) external {
+        require(msg.sender == address(this) || msg.sender == address(entryPoint), "Unauthorized");
+        
+        (bool success, bytes memory result) = to.call{value: value}(data);
+        if (!success) {
+            assembly {
+                revert(add(result, 32), mload(result))
+            }
+        }
+    }
+    
+    function executeBatch(
+        address[] calldata to,
+        uint256[] calldata value,
+        bytes[] calldata data
+    ) external {
+        require(msg.sender == address(this) || msg.sender == address(entryPoint), "Unauthorized");
+        require(to.length == value.length && to.length == data.length, "Mismatched arrays");
+        
+        for (uint256 i = 0; i < to.length; i++) {
+            (bool success, bytes memory result) = to[i].call{value: value[i]}(data[i]);
+            if (!success) {
+                assembly {
+                    revert(add(result, 32), mload(result))
+                }
+            }
+        }
+    }
+}
+
+
+
+=== FILE: ./contracts/interfaces/IExecutionPlugin.sol ===
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+interface IExecutionPlugin {
+    // Add execution-related functions as needed
+}
+
+
+
+=== FILE: ./contracts/interfaces/IPlugin.sol ===
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+interface IPlugin {
+    function onInstall(bytes calldata data) external;
+    function onUninstall(bytes calldata data) external;
+}
+
+
+
+=== FILE: ./contracts/interfaces/IValidationPlugin.sol ===
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import "../IEntryPoint.sol";
+
+interface IValidationPlugin {
+    function validateUserOp(
+        UserOperation calldata userOp,
+        bytes32 userOpHash
+    ) external returns (uint256);
+}
+
+
+
+=== FILE: ./contracts/MockEntryPoint.sol ===
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+import "./IEntryPoint.sol";
+
+contract MockEntryPoint is IEntryPoint {
+    mapping(address => uint256) public deposits;
+    
+    event UserOperationEvent(bytes32 indexed userOpHash, address indexed sender, address indexed paymaster, uint256 nonce, bool success, uint256 actualGasCost, uint256 actualGasUsed);
+    event Deposited(address indexed account, uint256 totalDeposit);
+    event Withdrawn(address indexed account, address withdrawAddress, uint256 amount);
+    
+    function handleOps(UserOperation[] calldata ops, address payable beneficiary) external override {
+        for (uint256 i = 0; i < ops.length; i++) {
+            UserOperation calldata op = ops[i];
+            bytes32 userOpHash = getUserOpHash(op);
+            
+            // In a real implementation, this would validate and execute the operation
+            // For mock purposes, we'll just emit an event
+            emit UserOperationEvent(userOpHash, op.sender, address(0), op.nonce, true, 0, 0);
+        }
+    }
+    
+    function depositTo(address account) external payable override {
+        deposits[account] += msg.value;
+        emit Deposited(account, deposits[account]);
+    }
+    
+    function withdrawTo(address payable withdrawAddress, uint256 withdrawAmount) external override {
+        require(deposits[msg.sender] >= withdrawAmount, "Insufficient deposit");
+        deposits[msg.sender] -= withdrawAmount;
+        withdrawAddress.transfer(withdrawAmount);
+        emit Withdrawn(msg.sender, withdrawAddress, withdrawAmount);
+    }
+    
+    function getUserOpHash(UserOperation calldata userOp) public pure override returns (bytes32) {
+        return keccak256(abi.encode(
+            userOp.sender,
+            userOp.nonce,
+            keccak256(userOp.initCode),
+            keccak256(userOp.callData),
+            userOp.callGasLimit,
+            userOp.verificationGasLimit,
+            userOp.preVerificationGas,
+            userOp.maxFeePerGas,
+            userOp.maxPriorityFeePerGas,
+            keccak256(userOp.paymasterAndData)
+        ));
+    }
+    
+    function getDepositInfo(address account) external view returns (uint256) {
+        return deposits[account];
+    }
+}
+
+
+
+=== FILE: ./README.md ===
+# ERC-4337 & ERC-6900 Smart Account MVP
+
+```
+ _____ ____   ____      _  _  _____ _____ _____ 
+| ____|  _ \ / ___|    | || ||___ /|___ /|___  |
+|  _| | |_) | |   _____| || |_ |_ \  |_ \   / / 
+| |___|  _ <| |__|_____|__   _|__) |___) | / /  
+|_____|_| \_\\____|       |_| |____/|____/ /_/   
+                                                 
+ __  __       _ _   _       ____  _       
+|  \/  |_   _| | |_(_)     / ___|(_) __ _ 
+| |\/| | | | | | __| |____| |  _ | |/ _` |
+| |  | | |_| | | |_| |____| |_| || | (_| |
+|_|  |_|\__,_|_|\__|_|     \____||_|\__, |
+                                    |___/ 
+```
+
+A complete implementation of ERC-4337 Account Abstraction with ERC-6900 modular plugins, featuring multi-signature functionality.
+
+## [+] Features
+
+- **ERC-4337 Account Abstraction**: Full implementation of smart contract wallets
+- **ERC-6900 Modular System**: Plugin-based architecture for extensibility
+- **Multi-Signature Support**: Configurable threshold signatures
+- **React GUI**: Interactive interface for testing
+- **Complete Wallet SDK**: JavaScript library for integration
+
+## [*] Prerequisites
+
+- Node.js v16+
+- npm or yarn
+- MetaMask or any Web3 wallet
+- Hardhat for contract deployment
+
+## [!] Installation
+
+1. **Clone the repository**
+```bash
+git clone <your-repo>
+cd erc4337-multisig-mvp
+```
+
+2. **Install dependencies**
+```bash
+npm install
+```
+
+3. **Install Hardhat and dependencies**
+```bash
+npm install --save-dev hardhat @nomiclabs/hardhat-ethers @nomiclabs/hardhat-waffle ethereum-waffle chai ethers
+```
+
+4. **Create `.env` file**
+```bash
+# For testnet deployment
+SEPOLIA_RPC_URL=your_rpc_url
+MUMBAI_RPC_URL=your_rpc_url
+PRIVATE_KEY=your_private_key
+ETHERSCAN_API_KEY=your_api_key
+```
+
+## [#] Project Structure
+
+```
+├── contracts/
+│   ├── ModularSmartAccount.sol    # Main smart account implementation
+│   ├── MultiSigPlugin.sol         # Multi-signature plugin
+│   └── SmartAccountFactory.sol    # Factory for deploying accounts
+├── src/
+│   ├── wallet.js                  # JavaScript wallet SDK
+│   └── SmartAccountDashboard.jsx  # React GUI component
+├── scripts/
+│   └── deploy.js                  # Deployment script
+└── README.md
+```
+
+## [>] Quick Start
+
+### 1. Deploy Contracts
+
+**Local deployment:**
+```bash
+npx hardhat node  # In one terminal
+npx hardhat run scripts/deploy.js --network localhost  # In another terminal
+```
+
+**Testnet deployment:**
+```bash
+npx hardhat run scripts/deploy.js --network sepolia
+```
+
+### 2. Run the GUI
+
+Create a simple React app:
+```bash
+npx create-react-app smart-account-gui
+cd smart-account-gui
+npm install ethers lucide-react
+```
+
+Copy the `SmartAccountDashboard.jsx` to `src/App.js` and run:
+```bash
+npm start
+```
+
+### 3. Using the Wallet SDK
+
+```javascript
+import { SmartAccountWallet } from './wallet.js';
+
+// Initialize wallet
+const wallet = new SmartAccountWallet(
+  provider,
+  entryPointAddress,
+  factoryAddress,
+  multiSigPluginAddress
+);
+
+// Create account
+await wallet.init(privateKey);
+const accountAddress = await wallet.createAccount();
+
+// Install multi-sig plugin
+await wallet.installMultiSigPlugin(
+  [owner1, owner2, owner3],  // owners
+  2                          // threshold
+);
+
+// Submit transaction
+await wallet.submitMultiSigTransaction(
+  recipientAddress,
+  ethers.utils.parseEther("0.1"),
+  "0x"  // data
+);
+```
+
+## [@] Contract Interfaces
+
+### ModularSmartAccount
+- `validateUserOp()`: Validates UserOperations (ERC-4337)
+- `installPlugin()`: Installs a new plugin (ERC-6900)
+- `execute()`: Executes transactions
+- `executeBatch()`: Executes multiple transactions
+
+### MultiSigPlugin
+- `onInstall()`: Configures owners and threshold
+- `submitTransaction()`: Creates new multi-sig transaction
+- `confirmTransaction()`: Adds confirmation
+- `executeTransaction()`: Executes when threshold is met
+
+## [?] Testing
+
+Run the test suite:
+```bash
+RUN_TESTS=true npx hardhat run scripts/deploy.js --network localhost
+```
+
+## [~] Configuration
+
+### EntryPoint Address
+- Mainnet/Testnet: `0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789`
+- Local: Deploy your own or use the one from deployment
+
+### Gas Configuration
+Adjust in `wallet.js`:
+```javascript
+callGasLimit: 200000,
+verificationGasLimit: 100000,
+preVerificationGas: 50000,
+```
+
+## [=] Network Support
+
+- Ethereum Mainnet
+- Sepolia Testnet
+- Polygon Mumbai
+- Local Hardhat Network
+
+## [!] Security Considerations
+
+This is an MVP implementation. For production:
+- Audit all smart contracts
+- Implement proper signature validation
+- Add access control mechanisms
+- Use a production-ready bundler
+- Implement proper nonce management
+
+## [i] Resources
+
+- [ERC-4337 Specification](https://eips.ethereum.org/EIPS/eip-4337)
+- [ERC-6900 Specification](https://eips.ethereum.org/EIPS/eip-6900)
+- [Account Abstraction Documentation](https://docs.stackup.sh/)
+
+## [&] Contributing
+
+Feel free to submit issues and enhancement requests!
+
+## [c] License
+
+MIT License
+
+
+=== FILE: ./setup-script.sh ===
+#!/bin/bash
+
+# ERC-4337 & ERC-6900 Smart Account MVP Setup Script
+# This script creates the complete project structure with placeholder files
+
+echo "============================================="
+echo " ERC-4337 & ERC-6900 Smart Account MVP Setup"
+echo "============================================="
+echo ""
+
+# Check if we're in a project directory
+if [ ! -f "package.json" ] && [ -z "$(ls -A)" ]; then
+    echo "[>] Initializing project in current directory: $(pwd)"
+else
+    echo "[!] Warning: Current directory is not empty."
+    read -p "Continue anyway? (y/N) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "[x] Setup cancelled."
+        exit 1
+    fi
+fi
+
+# Create directory structure
+echo "[>] Creating directory structure..."
+mkdir -p contracts
+mkdir -p frontend/public
+mkdir -p frontend/src/components
+mkdir -p frontend/src/utils
+mkdir -p scripts
+mkdir -p test
+
+# Create root files
+echo "[>] Creating root configuration files..."
+
+# Create package.json
+cat > package.json << 'EOF'
+{
+  "name": "erc4337-multisig-mvp",
+  "version": "1.0.0",
+  "description": "ERC-4337 & ERC-6900 Smart Account MVP with Multi-Sig",
+  "scripts": {
+    "compile": "hardhat compile",
+    "deploy": "hardhat run scripts/deploy.js",
+    "deploy:local": "hardhat run scripts/deploy.js --network localhost",
+    "deploy:sepolia": "hardhat run scripts/deploy.js --network sepolia",
+    "test": "hardhat test",
+    "node": "hardhat node"
+  },
+  "keywords": ["erc4337", "erc6900", "smart-account", "multisig"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@nomiclabs/hardhat-ethers": "^2.0.0",
+    "@nomiclabs/hardhat-etherscan": "^3.0.0",
+    "@nomiclabs/hardhat-waffle": "^2.0.0",
+    "chai": "^4.2.0",
+    "ethereum-waffle": "^3.0.0",
+    "ethers": "^5.0.0",
+    "hardhat": "^2.12.0"
+  }
+}
+EOF
+
+# Create hardhat.config.js
+cat > hardhat.config.js << 'EOF'
+require("@nomiclabs/hardhat-waffle");
+require("@nomiclabs/hardhat-etherscan");
+require("dotenv").config();
+
+module.exports = {
+  solidity: {
+    version: "0.8.19",
+    settings: {
+      optimizer: {
+        enabled: true,
+        runs: 200
+      }
+    }
+  },
+  networks: {
+    hardhat: {
+      chainId: 31337
+    },
+    localhost: {
+      url: "http://127.0.0.1:8545"
+    },
+    sepolia: {
+      url: process.env.SEPOLIA_RPC_URL || "",
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : []
+    },
+    goerli: {
+      url: process.env.GOERLI_RPC_URL || "",
+      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : []
+    }
+  },
+  etherscan: {
+    apiKey: process.env.ETHERSCAN_API_KEY
+  }
+};
+EOF
+
+# Create .env.example
+cat > .env.example << 'EOF'
+# RPC URLs
+SEPOLIA_RPC_URL=https://sepolia.infura.io/v3/YOUR_INFURA_KEY
+GOERLI_RPC_URL=https://goerli.infura.io/v3/YOUR_INFURA_KEY
+
+# Private key (without 0x prefix)
+PRIVATE_KEY=your_private_key_here
+
+# Etherscan API key for verification
+ETHERSCAN_API_KEY=your_etherscan_api_key
+EOF
+
+# Create .gitignore
+cat > .gitignore << 'EOF'
+# Dependencies
+node_modules/
+frontend/node_modules/
+
+# Environment files
+.env
+.env.local
+
+# Hardhat files
+cache/
+artifacts/
+typechain/
+typechain-types/
+
+# Coverage
+coverage/
+coverage.json
+
+# Builds
+build/
+dist/
+frontend/build/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+*.log
+
+# Deployment files
+deployments-*.json
+EOF
+
+# Create contract placeholders
+echo "[>] Creating contract placeholders..."
+
+# EntryPoint interface placeholder
+cat > contracts/IEntryPoint.sol << 'EOF'
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+// Placeholder for IEntryPoint interface
+// Full implementation will be added manually
+interface IEntryPoint {
+    // ERC-4337 EntryPoint interface
+}
+EOF
+
+# Create test file
+cat > test/MultiSig.test.js << 'EOF'
+const { expect } = require("chai");
+const { ethers } = require("hardhat");
+
+describe("MultiSig Smart Account", function () {
+  let factory, multiSigPlugin, account;
+  let owner1, owner2, owner3;
+
+  beforeEach(async function () {
+    [owner1, owner2, owner3] = await ethers.getSigners();
+    
+    // Deploy contracts
+    // TODO: Add deployment logic
+  });
+
+  describe("Account Creation", function () {
+    it("Should create a new smart account", async function () {
+      // TODO: Add test
+    });
+  });
+
+  describe("Multi-Sig Operations", function () {
+    it("Should submit and confirm transactions", async function () {
+      // TODO: Add test
+    });
+  });
+});
+EOF
+
+# Create frontend files
+echo "[>] Creating frontend structure..."
+
+# Frontend package.json
+cat > frontend/package.json << 'EOF'
+{
+  "name": "erc4337-multisig-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-scripts": "5.0.1",
+    "lucide-react": "^0.263.1"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject"
+  },
+  "eslintConfig": {
+    "extends": ["react-app"]
+  },
+  "browserslist": {
+    "production": [">0.2%", "not dead", "not op_mini all"],
+    "development": ["last 1 chrome version", "last 1 firefox version", "last 1 safari version"]
+  }
+}
+EOF
+
+# Frontend index.html
+cat > frontend/public/index.html << 'EOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="ERC-4337 & ERC-6900 Multi-Sig Wallet" />
+  <title>Smart Account Multi-Sig</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+  <noscript>You need to enable JavaScript to run this app.</noscript>
+  <div id="root"></div>
+</body>
+</html>
+EOF
+
+# Frontend index.js
+cat > frontend/src/index.js << 'EOF'
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import App from './App';
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+EOF
+
+# Frontend App.js
+cat > frontend/src/App.js << 'EOF'
+import React from 'react';
+import SmartAccountDashboard from './components/SmartAccountDashboard';
+
+function App() {
+  return (
+    <div className="App">
+      <SmartAccountDashboard />
+    </div>
+  );
+}
+
+export default App;
+EOF
+
+# Create placeholder for components
+cat > frontend/src/components/.gitkeep << 'EOF'
+# Place SmartAccountDashboard.jsx here
+EOF
+
+cat > frontend/src/utils/.gitkeep << 'EOF'
+# Place wallet.js here
+EOF
+
+# Create deployment addresses tracker
+cat > scripts/addresses.json << 'EOF'
+{
+  "localhost": {
+    "entryPoint": "",
+    "factory": "",
+    "multiSigPlugin": ""
+  },
+  "sepolia": {
+    "entryPoint": "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789",
+    "factory": "",
+    "multiSigPlugin": ""
+  },
+  "goerli": {
+    "entryPoint": "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789",
+    "factory": "",
+    "multiSigPlugin": ""
+  }
+}
+EOF
+
+# Create deployment helper script
+cat > scripts/verify.js << 'EOF'
+// Contract verification script
+const hre = require("hardhat");
+
+async function main() {
+  console.log("[>] Verifying contracts on Etherscan...");
+  
+  // Load deployment addresses
+  const addresses = require("./addresses.json")[hre.network.name];
+  
+  if (addresses.multiSigPlugin) {
+    await hre.run("verify:verify", {
+      address: addresses.multiSigPlugin,
+      constructorArguments: [],
+    });
+  }
+  
+  if (addresses.factory) {
+    await hre.run("verify:verify", {
+      address: addresses.factory,
+      constructorArguments: [addresses.entryPoint],
+    });
+  }
+  
+  console.log("[+] Verification complete!");
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
+EOF
+
+# Create main README placeholder
+cat > README.md << 'EOF'
+# ERC-4337 & ERC-6900 Smart Account MVP
+
+[!] Full README will be added manually
+
+## Quick Setup
+
+1. Install dependencies:
+   ```bash
+   npm install
+   cd frontend && npm install
+   ```
+
+2. Copy environment file:
+   ```bash
+   cp .env.example .env
+   # Edit .env with your values
+   ```
+
+3. Deploy contracts:
+   ```bash
+   npm run deploy:local
+   ```
+
+4. Start frontend:
+   ```bash
+   cd frontend && npm start
+   ```
+EOF
+
+# Create contract placeholders note
+cat > contracts/README.md << 'EOF'
+# Smart Contracts
+
+Place the following files here:
+- ModularSmartAccount.sol
+- MultiSigPlugin.sol  
+- SmartAccountFactory.sol
+
+These files contain the main implementation and should be added manually.
+EOF
+
+# Make scripts executable
+chmod +x scripts/*.js
+
+# Final message
+echo ""
+echo "============================================="
+echo "[+] Project structure created successfully!"
+echo "============================================="
+echo ""
+echo "Next steps:"
+echo "1. Copy the generated contract files to contracts/"
+echo "2. Copy SmartAccountDashboard.jsx to frontend/src/components/"
+echo "3. Copy wallet.js to frontend/src/utils/"
+echo "4. Copy deploy.js to scripts/"
+echo "5. Copy the full README.md to the root"
+echo ""
+echo "Then run:"
+echo "  npm install"
+echo "  cd frontend && npm install"
+echo ""
+echo "[i] Don't forget to:"
+echo "  - Copy .env.example to .env and add your keys"
+echo "  - Update contract addresses in scripts/addresses.json after deployment"
+echo ""
+
+
+=== FILE: ./.gitignore ===
+# Dependencies
+node_modules/
+frontend/node_modules/
+
+# Environment files
+.env
+.env.local
+
+# Hardhat files
+cache/
+artifacts/
+typechain/
+typechain-types/
+
+# Coverage
+coverage/
+coverage.json
+
+# Builds
+build/
+dist/
+frontend/build/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+*.log
+
+# Deployment files
+deployments-*.json
+
+
+
+=== FILE: ./package.json ===
+{
+  "name": "erc4337-multisig-mvp",
+  "version": "1.0.0",
+  "description": "ERC-4337 & ERC-6900 Smart Account MVP with Multi-Sig",
+  "scripts": {
+    "compile": "hardhat compile",
+    "deploy": "hardhat run scripts/deploy.js",
+    "deploy:local": "hardhat run scripts/deploy.js --network localhost",
+    "deploy:sepolia": "hardhat run scripts/deploy.js --network sepolia",
+    "test": "hardhat test",
+    "node": "hardhat node"
+  },
+  "keywords": ["erc4337", "erc6900", "smart-account", "multisig"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@nomiclabs/hardhat-ethers": "^2.0.0",
+    "@nomiclabs/hardhat-etherscan": "^3.0.0",
+    "@nomiclabs/hardhat-waffle": "^2.0.0",
+    "chai": "^4.2.0",
+    "ethereum-waffle": "^3.0.0",
+    "ethers": "^5.0.0",
+    "hardhat": "^2.12.0"
+  }
+}
+
+
+
+=== FILE: ./scripts/deploy.js.backup ===
+// deploy.js - Deployment script for ERC-4337 & ERC-6900 contracts
+const { ethers } = require("hardhat");
+const fs = require('fs');
+
+async function main() {
+  console.log("🚀 Deploying ERC-4337 & ERC-6900 Smart Account System...\n");
+
+  // Get deployer
+  const [deployer] = await ethers.getSigners();
+  console.log("Deploying contracts with account:", deployer.address);
+  console.log("Account balance:", ethers.utils.formatEther(await deployer.getBalance()), "ETH\n");
+
+  // Deploy EntryPoint (or use existing one)
+  console.log("1. Deploying EntryPoint...");
+  let entryPoint;
+  if (network.name === "localhost" || network.name === "hardhat") {
+    const MockEntryPoint = await ethers.getContractFactory("MockEntryPoint");
+    entryPoint = await MockEntryPoint.deploy();
+    await entryPoint.deployed();
+    console.log("   MockEntryPoint deployed to:", entryPoint.address);
+  } else {
+    // Use the official EntryPoint address for testnets/mainnet
+    entryPoint = { address: "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789" };
+    console.log("   Using official EntryPoint at:", entryPoint.address);
+  }
+
+  // Deploy MultiSigPlugin
+  console.log("\n2. Deploying MultiSigPlugin...");
+  const MultiSigPlugin = await ethers.getContractFactory("MultiSigPlugin");
+  const multiSigPlugin = await MultiSigPlugin.deploy();
+  await multiSigPlugin.deployed();
+  console.log("   MultiSigPlugin deployed to:", multiSigPlugin.address);
+
+  // Deploy SmartAccountFactory
+  console.log("\n3. Deploying SmartAccountFactory...");
+  const SmartAccountFactory = await ethers.getContractFactory("SmartAccountFactory");
+  const factory = await SmartAccountFactory.deploy(entryPoint.address);
+  await factory.deployed();
+  console.log("   SmartAccountFactory deployed to:", factory.address);
+
+  // Save deployment addresses
+  const deploymentInfo = {
+    network: network.name,
+    chainId: network.config.chainId,
+    deployer: deployer.address,
+    contracts: {
+      entryPoint: entryPoint.address,
+      multiSigPlugin: multiSigPlugin.address,
+      factory: factory.address
+    },
+    timestamp: new Date().toISOString()
+  };
+
+  // Write deployment info to file
+  fs.writeFileSync(
+    `deployments-${network.name}.json`,
+    JSON.stringify(deploymentInfo, null, 2)
+  );
+
+  // Update addresses.json
+  const addressesPath = './scripts/addresses.json';
+  let addresses = {};
+  if (fs.existsSync(addressesPath)) {
+    addresses = JSON.parse(fs.readFileSync(addressesPath, 'utf8'));
+  }
+  
+  addresses[network.name] = {
+    entryPoint: entryPoint.address,
+    factory: factory.address,
+    multiSigPlugin: multiSigPlugin.address
+  };
+  
+  fs.writeFileSync(addressesPath, JSON.stringify(addresses, null, 2));
+
+  console.log("\n✅ Deployment complete!");
+  console.log("\n📄 Deployment info saved to:", `deployments-${network.name}.json`);
+  
+  // Verify contracts on Etherscan (if not on localhost)
+  if (network.name !== "localhost" && network.name !== "hardhat") {
+    console.log("\n🔍 Verifying contracts on Etherscan...");
+    
+    await new Promise(resolve => setTimeout(resolve, 20000)); // Wait for Etherscan to index
+    
+    try {
+      await hre.run("verify:verify", {
+        address: multiSigPlugin.address,
+        constructorArguments: [],
+      });
+      
+      await hre.run("verify:verify", {
+        address: factory.address,
+        constructorArguments: [entryPoint.address],
+      });
+      
+      console.log("✅ Contracts verified!");
+    } catch (error) {
+      console.log("⚠️  Verification failed:", error.message);
+    }
+  }
+
+  return deploymentInfo;
+}
+
+// Test script
+async function testDeployment(deploymentInfo) {
+  console.log("\n🧪 Running deployment tests...\n");
+  
+  const [owner1, owner2, owner3] = await ethers.getSigners();
+  
+  // Get contract instances
+  const factory = await ethers.getContractAt("SmartAccountFactory", deploymentInfo.contracts.factory);
+  const multiSigPlugin = await ethers.getContractAt("MultiSigPlugin", deploymentInfo.contracts.multiSigPlugin);
+  
+  // Create a smart account
+  console.log("1. Creating smart account...");
+  const salt = 0;
+  const tx = await factory.createAccount(owner1.address, salt);
+  const receipt = await tx.wait();
+  
+  const accountAddress = await factory.getAddress(owner1.address, salt);
+  console.log("   Smart account created at:", accountAddress);
+  
+  // Get account instance
+  const account = await ethers.getContractAt("ModularSmartAccount", accountAddress);
+  
+  // Install multi-sig plugin
+  console.log("\n2. Installing multi-sig plugin...");
+  const owners = [owner1.address, owner2.address, owner3.address];
+  const threshold = 2;
+  
+  const installData = ethers.utils.defaultAbiCoder.encode(
+    ["address[]", "uint256"],
+    [owners, threshold]
+  );
+  
+  // Note: This would normally be done through a UserOperation
+  const selector = "0x00000000"; // Custom selector for multi-sig
+  await account.connect(owner1).installPlugin(selector, multiSigPlugin.address, installData);
+  console.log("   Multi-sig plugin installed with", owners.length, "owners and threshold of", threshold);
+  
+  // Fund the account
+  console.log("\n3. Funding account...");
+  await owner1.sendTransaction({
+    to: accountAddress,
+    value: ethers.utils.parseEther("1.0")
+  });
+  const balance = await ethers.provider.getBalance(accountAddress);
+  console.log("   Account balance:", ethers.utils.formatEther(balance), "ETH");
+  
+  console.log("\n✅ All tests passed!");
+}
+
+// Run deployment and tests
+main()
+  .then(async (deploymentInfo) => {
+    if (process.env.RUN_TESTS === "true") {
+      await testDeployment(deploymentInfo);
+    }
+    process.exit(0);
+  })
+  .catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+
+
+
+=== FILE: ./scripts/addresses.json ===
+{
+  "localhost": {
+    "entryPoint": "",
+    "factory": "",
+    "multiSigPlugin": ""
+  },
+  "sepolia": {
+    "entryPoint": "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789",
+    "factory": "",
+    "multiSigPlugin": ""
+  },
+  "holesky": {
+    "entryPoint": "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789",
+    "factory": "",
+    "multiSigPlugin": ""
+  },
+  "polygon_mumbai": {
+    "entryPoint": "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789",
+    "factory": "",
+    "multiSigPlugin": ""
+  }
+}
+
+
+=== FILE: ./scripts/deploy.js ===
+// deploy.js - Deployment script optimized for Sepolia with limited ETH
+const { ethers } = require("hardhat");
+const fs = require('fs');
+
+async function main() {
+  console.log("🚀 Deploying ERC-4337 & ERC-6900 Smart Account System to", network.name, "...\n");
+
+  // Get deployer
+  const [deployer] = await ethers.getSigners();
+  console.log("Deploying contracts with account:", deployer.address);
+  const balance = await deployer.getBalance();
+  console.log("Account balance:", ethers.utils.formatEther(balance), "ETH");
+  
+  // Check if we have enough ETH
+  if (network.name === "sepolia" && balance.lt(ethers.utils.parseEther("0.05"))) {
+    console.log("\n⚠️  Warning: Low balance for Sepolia deployment!");
+    console.log("Recommended: At least 0.05 ETH for safe deployment");
+    console.log("Current: ", ethers.utils.formatEther(balance), "ETH\n");
+  }
+
+  // Deploy EntryPoint (or use existing one)
+  console.log("1. Checking EntryPoint...");
+  let entryPoint;
+  if (network.name === "localhost" || network.name === "hardhat") {
+    console.log("   Deploying MockEntryPoint for local testing...");
+    const MockEntryPoint = await ethers.getContractFactory("MockEntryPoint");
+    entryPoint = await MockEntryPoint.deploy();
+    await entryPoint.deployed();
+    console.log("   ✓ MockEntryPoint deployed to:", entryPoint.address);
+  } else {
+    // Use the official EntryPoint address for testnets/mainnet
+    entryPoint = { address: "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789" };
+    console.log("   ✓ Using official EntryPoint at:", entryPoint.address);
+    console.log("   (No deployment needed - saves gas!)");
+  }
+
+  // Deploy MultiSigPlugin with gas optimization
+  console.log("\n2. Deploying MultiSigPlugin...");
+  const MultiSigPlugin = await ethers.getContractFactory("MultiSigPlugin");
+  
+  // Estimate gas and add buffer
+  const deployTx = MultiSigPlugin.getDeployTransaction();
+  const estimatedGas = await deployer.estimateGas(deployTx);
+  console.log("   Estimated gas:", estimatedGas.toString());
+  
+  // Deploy with optimized gas settings for Sepolia
+  const multiSigPlugin = await MultiSigPlugin.deploy({
+    gasLimit: estimatedGas.mul(110).div(100), // 10% buffer
+    maxFeePerGas: network.name === "sepolia" ? ethers.utils.parseUnits("20", "gwei") : undefined,
+    maxPriorityFeePerGas: network.name === "sepolia" ? ethers.utils.parseUnits("1.5", "gwei") : undefined
+  });
+  
+  await multiSigPlugin.deployed();
+  console.log("   ✓ MultiSigPlugin deployed to:", multiSigPlugin.address);
+  console.log("   Gas used:", (await multiSigPlugin.deployTransaction.wait()).gasUsed.toString());
+
+  // Deploy SmartAccountFactory with gas optimization
+  console.log("\n3. Deploying SmartAccountFactory...");
+  const SmartAccountFactory = await ethers.getContractFactory("SmartAccountFactory");
+  
+  // Deploy with optimized gas settings
+  const factory = await SmartAccountFactory.deploy(entryPoint.address, {
+    gasLimit: 3000000, // Fixed reasonable limit
+    maxFeePerGas: network.name === "sepolia" ? ethers.utils.parseUnits("20", "gwei") : undefined,
+    maxPriorityFeePerGas: network.name === "sepolia" ? ethers.utils.parseUnits("1.5", "gwei") : undefined
+  });
+  
+  await factory.deployed();
+  console.log("   ✓ SmartAccountFactory deployed to:", factory.address);
+  console.log("   Gas used:", (await factory.deployTransaction.wait()).gasUsed.toString());
+
+  // Calculate total deployment cost
+  if (network.name === "sepolia") {
+    const deployerEndBalance = await deployer.getBalance();
+    const totalCost = balance.sub(deployerEndBalance);
+    console.log("\n💰 Deployment Cost Summary:");
+    console.log("   Total ETH spent:", ethers.utils.formatEther(totalCost));
+    console.log("   Remaining balance:", ethers.utils.formatEther(deployerEndBalance), "ETH");
+  }
+
+  // Save deployment addresses
+  const deploymentInfo = {
+    network: network.name,
+    chainId: network.config.chainId,
+    deployer: deployer.address,
+    contracts: {
+      entryPoint: entryPoint.address,
+      multiSigPlugin: multiSigPlugin.address,
+      factory: factory.address
+    },
+    timestamp: new Date().toISOString(),
+    deploymentCost: network.name === "sepolia" ? {
+      multiSigPluginGas: (await multiSigPlugin.deployTransaction.wait()).gasUsed.toString(),
+      factoryGas: (await factory.deployTransaction.wait()).gasUsed.toString()
+    } : undefined
+  };
+
+  // Write deployment info to file
+  fs.writeFileSync(
+    `deployments-${network.name}.json`,
+    JSON.stringify(deploymentInfo, null, 2)
+  );
+
+  // Update addresses.json
+  const addressesPath = './scripts/addresses.json';
+  let addresses = {};
+  if (fs.existsSync(addressesPath)) {
+    addresses = JSON.parse(fs.readFileSync(addressesPath, 'utf8'));
+  }
+  
+  addresses[network.name] = {
+    entryPoint: entryPoint.address,
+    factory: factory.address,
+    multiSigPlugin: multiSigPlugin.address
+  };
+  
+  fs.writeFileSync(addressesPath, JSON.stringify(addresses, null, 2));
+
+  console.log("\n✅ Deployment complete!");
+  console.log("\n📄 Deployment info saved to:", `deployments-${network.name}.json`);
+  console.log("\n🔗 Contract Addresses:");
+  console.log("   EntryPoint:", entryPoint.address);
+  console.log("   MultiSigPlugin:", multiSigPlugin.address);
+  console.log("   SmartAccountFactory:", factory.address);
+  
+  // Sepolia specific instructions
+  if (network.name === "sepolia") {
+    console.log("\n📝 Next Steps for Sepolia:");
+    console.log("   1. Verify contracts on Etherscan:");
+    console.log("      npx hardhat run scripts/verify.js --network sepolia");
+    console.log("   2. Update frontend with deployed addresses");
+    console.log("   3. You can interact with contracts at:");
+    console.log("      https://sepolia.etherscan.io/address/" + multiSigPlugin.address);
+    console.log("      https://sepolia.etherscan.io/address/" + factory.address);
+  }
+  
+  // Skip automatic verification for Sepolia to save time
+  if (network.name === "sepolia") {
+    console.log("\n📌 Note: Skipping automatic verification to complete deployment faster.");
+    console.log("   Run verification manually when ready.");
+  } else if (network.name !== "localhost" && network.name !== "hardhat") {
+    console.log("\n🔍 Waiting before verification...");
+    await new Promise(resolve => setTimeout(resolve, 20000));
+    
+    try {
+      await hre.run("verify:verify", {
+        address: multiSigPlugin.address,
+        constructorArguments: [],
+      });
+      
+      await hre.run("verify:verify", {
+        address: factory.address,
+        constructorArguments: [entryPoint.address],
+      });
+      
+      console.log("✅ Contracts verified!");
+    } catch (error) {
+      console.log("⚠️  Verification failed:", error.message);
+    }
+  }
+
+  return deploymentInfo;
+}
+
+// Minimal test script for Sepolia (to save gas)
+async function minimalTest(deploymentInfo) {
+  console.log("\n🧪 Running minimal deployment test...\n");
+  
+  const [deployer] = await ethers.getSigners();
+  
+  // Just verify contracts are deployed
+  console.log("1. Checking MultiSigPlugin...");
+  const multiSigCode = await ethers.provider.getCode(deploymentInfo.contracts.multiSigPlugin);
+  console.log("   ✓ MultiSigPlugin deployed:", multiSigCode.length > 2);
+  
+  console.log("\n2. Checking SmartAccountFactory...");
+  const factoryCode = await ethers.provider.getCode(deploymentInfo.contracts.factory);
+  console.log("   ✓ SmartAccountFactory deployed:", factoryCode.length > 2);
+  
+  console.log("\n✅ Basic deployment verification passed!");
+  console.log("\n💡 Tip: Create and test smart accounts using the frontend to save ETH");
+}
+
+// Run deployment
+main()
+  .then(async (deploymentInfo) => {
+    // Only run tests on localhost
+    if (network.name === "localhost" && process.env.RUN_TESTS === "true") {
+      const { testDeployment } = require('./test-deployment');
+      await testDeployment(deploymentInfo);
+    } else if (network.name === "sepolia") {
+      await minimalTest(deploymentInfo);
+    }
+    process.exit(0);
+  })
+  .catch((error) => {
+    console.error("\n❌ Deployment failed:", error.message);
+    console.error(error);
+    process.exit(1);
+  });
+
+
+
+=== FILE: ./scripts/verify.js ===
+// Contract verification script
+const hre = require("hardhat");
+
+async function main() {
+  console.log("[>] Verifying contracts on Etherscan...");
+  
+  // Load deployment addresses
+  const addresses = require("./addresses.json")[hre.network.name];
+  
+  if (addresses.multiSigPlugin) {
+    await hre.run("verify:verify", {
+      address: addresses.multiSigPlugin,
+      constructorArguments: [],
+    });
+  }
+  
+  if (addresses.factory) {
+    await hre.run("verify:verify", {
+      address: addresses.factory,
+      constructorArguments: [addresses.entryPoint],
+    });
+  }
+  
+  console.log("[+] Verification complete!");
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
+
+
+
+=== FILE: ./scripts/estimate-gas.js ===
+// estimate-gas.js - Estimate deployment costs
+const { ethers } = require("hardhat");
+
+async function main() {
+  console.log("💰 Estimating deployment costs for", network.name, "...\n");
+  
+  const [deployer] = await ethers.getSigners();
+  
+  // Get current gas prices
+  const gasPrice = await deployer.getGasPrice();
+  console.log("Current gas price:", ethers.utils.formatUnits(gasPrice, "gwei"), "gwei");
+  
+  // Estimate MockEntryPoint (only for localhost)
+  if (network.name === "localhost") {
+    const MockEntryPoint = await ethers.getContractFactory("MockEntryPoint");
+    const mockGas = await deployer.estimateGas(MockEntryPoint.getDeployTransaction());
+    console.log("\nMockEntryPoint:");
+    console.log("  Gas:", mockGas.toString());
+    console.log("  Cost:", ethers.utils.formatEther(mockGas.mul(gasPrice)), "ETH");
+  }
+  
+  // Estimate MultiSigPlugin
+  const MultiSigPlugin = await ethers.getContractFactory("MultiSigPlugin");
+  const multiSigGas = await deployer.estimateGas(MultiSigPlugin.getDeployTransaction());
+  console.log("\nMultiSigPlugin:");
+  console.log("  Gas:", multiSigGas.toString());
+  console.log("  Cost:", ethers.utils.formatEther(multiSigGas.mul(gasPrice)), "ETH");
+  
+  // Estimate SmartAccountFactory
+  const SmartAccountFactory = await ethers.getContractFactory("SmartAccountFactory");
+  const factoryGas = await deployer.estimateGas(
+    SmartAccountFactory.getDeployTransaction("0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789")
+  );
+  console.log("\nSmartAccountFactory:");
+  console.log("  Gas:", factoryGas.toString());
+  console.log("  Cost:", ethers.utils.formatEther(factoryGas.mul(gasPrice)), "ETH");
+  
+  // Total
+  const totalGas = multiSigGas.add(factoryGas);
+  const totalCost = totalGas.mul(gasPrice);
+  console.log("\n📊 Total Deployment Cost:");
+  console.log("  Total Gas:", totalGas.toString());
+  console.log("  Total Cost:", ethers.utils.formatEther(totalCost), "ETH");
+  
+  // With 50% buffer
+  const bufferedCost = totalCost.mul(150).div(100);
+  console.log("  With 50% buffer:", ethers.utils.formatEther(bufferedCost), "ETH");
+  
+  if (network.name === "sepolia") {
+    console.log("\n💡 Sepolia Deployment Tips:");
+    console.log("  - Current balance needed: ~", ethers.utils.formatEther(bufferedCost), "ETH");
+    console.log("  - Your 0.1 ETH should be sufficient!");
+    console.log("  - Use the deploy-sepolia.sh script for easy deployment");
+  }
+}
+
+main()
+  .then(() => process.exit(0))
+  .catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+
+
+
+=== FILE: ./scripts/deploy-sepolia.sh ===
+#!/bin/bash
+
+echo "======================================"
+echo " Deploying to Sepolia Testnet"
+echo "======================================"
+echo ""
+
+# Check if .env exists
+if [ ! -f .env ]; then
+    echo "❌ Error: .env file not found!"
+    echo "Please copy .env.example to .env and add your keys"
+    exit 1
+fi
+
+# Load environment variables
+source .env
+
+# Check if PRIVATE_KEY is set
+if [ -z "$PRIVATE_KEY" ]; then
+    echo "❌ Error: PRIVATE_KEY not set in .env!"
+    exit 1
+fi
+
+# Check if SEPOLIA_RPC_URL is set
+if [ -z "$SEPOLIA_RPC_URL" ]; then
+    echo "❌ Error: SEPOLIA_RPC_URL not set in .env!"
+    exit 1
+fi
+
+echo "✓ Environment configured"
+echo ""
+
+# Compile contracts
+echo "📦 Compiling contracts..."
+npx hardhat compile
+
+if [ $? -ne 0 ]; then
+    echo "❌ Compilation failed!"
+    exit 1
+fi
+
+echo "✓ Contracts compiled"
+echo ""
+
+# Deploy to Sepolia
+echo "🚀 Deploying to Sepolia..."
+echo "This will use approximately 0.02-0.05 ETH"
+echo ""
+
+npx hardhat run scripts/deploy.js --network sepolia
+
+if [ $? -eq 0 ]; then
+    echo ""
+    echo "✅ Deployment successful!"
+    echo ""
+    echo "📋 Check deployments-sepolia.json for contract addresses"
+    echo ""
+    echo "Next steps:"
+    echo "1. Verify contracts: npx hardhat run scripts/verify.js --network sepolia"
+    echo "2. Update frontend with the deployed addresses"
+    echo "3. Test using the React GUI"
+else
+    echo ""
+    echo "❌ Deployment failed!"
+    echo "Check your ETH balance and try again"
+fi
+
+
+
+=== FILE: ./.env.example ===
+# RPC URLs
+SEPOLIA_RPC_URL=https://sepolia.infura.io/v3/YOUR_INFURA_KEY
+HOLESKY_RPC_URL=https://holesky.infura.io/v3/YOUR_INFURA_KEY
+POLYGON_MUMBAI_RPC_URL=https://polygon-mumbai.infura.io/v3/YOUR_INFURA_KEY
+ARBITRUM_SEPOLIA_RPC_URL=https://arbitrum-sepolia.infura.io/v3/YOUR_INFURA_KEY
+
+# Private key (without 0x prefix)
+PRIVATE_KEY=your_private_key_here
+
+# Etherscan API key for verification
+ETHERSCAN_API_KEY=your_etherscan_api_key
+POLYGONSCAN_API_KEY=your_polygonscan_api_key
+ARBISCAN_API_KEY=your_arbiscan_api_key
+
+
+

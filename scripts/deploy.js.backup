@@ -1,0 +1,164 @@
+// deploy.js - Deployment script for ERC-4337 & ERC-6900 contracts
+const { ethers } = require("hardhat");
+const fs = require('fs');
+
+async function main() {
+  console.log("🚀 Deploying ERC-4337 & ERC-6900 Smart Account System...\n");
+
+  // Get deployer
+  const [deployer] = await ethers.getSigners();
+  console.log("Deploying contracts with account:", deployer.address);
+  console.log("Account balance:", ethers.utils.formatEther(await deployer.getBalance()), "ETH\n");
+
+  // Deploy EntryPoint (or use existing one)
+  console.log("1. Deploying EntryPoint...");
+  let entryPoint;
+  if (network.name === "localhost" || network.name === "hardhat") {
+    const MockEntryPoint = await ethers.getContractFactory("MockEntryPoint");
+    entryPoint = await MockEntryPoint.deploy();
+    await entryPoint.deployed();
+    console.log("   MockEntryPoint deployed to:", entryPoint.address);
+  } else {
+    // Use the official EntryPoint address for testnets/mainnet
+    entryPoint = { address: "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789" };
+    console.log("   Using official EntryPoint at:", entryPoint.address);
+  }
+
+  // Deploy MultiSigPlugin
+  console.log("\n2. Deploying MultiSigPlugin...");
+  const MultiSigPlugin = await ethers.getContractFactory("MultiSigPlugin");
+  const multiSigPlugin = await MultiSigPlugin.deploy();
+  await multiSigPlugin.deployed();
+  console.log("   MultiSigPlugin deployed to:", multiSigPlugin.address);
+
+  // Deploy SmartAccountFactory
+  console.log("\n3. Deploying SmartAccountFactory...");
+  const SmartAccountFactory = await ethers.getContractFactory("SmartAccountFactory");
+  const factory = await SmartAccountFactory.deploy(entryPoint.address);
+  await factory.deployed();
+  console.log("   SmartAccountFactory deployed to:", factory.address);
+
+  // Save deployment addresses
+  const deploymentInfo = {
+    network: network.name,
+    chainId: network.config.chainId,
+    deployer: deployer.address,
+    contracts: {
+      entryPoint: entryPoint.address,
+      multiSigPlugin: multiSigPlugin.address,
+      factory: factory.address
+    },
+    timestamp: new Date().toISOString()
+  };
+
+  // Write deployment info to file
+  fs.writeFileSync(
+    `deployments-${network.name}.json`,
+    JSON.stringify(deploymentInfo, null, 2)
+  );
+
+  // Update addresses.json
+  const addressesPath = './scripts/addresses.json';
+  let addresses = {};
+  if (fs.existsSync(addressesPath)) {
+    addresses = JSON.parse(fs.readFileSync(addressesPath, 'utf8'));
+  }
+  
+  addresses[network.name] = {
+    entryPoint: entryPoint.address,
+    factory: factory.address,
+    multiSigPlugin: multiSigPlugin.address
+  };
+  
+  fs.writeFileSync(addressesPath, JSON.stringify(addresses, null, 2));
+
+  console.log("\n✅ Deployment complete!");
+  console.log("\n📄 Deployment info saved to:", `deployments-${network.name}.json`);
+  
+  // Verify contracts on Etherscan (if not on localhost)
+  if (network.name !== "localhost" && network.name !== "hardhat") {
+    console.log("\n🔍 Verifying contracts on Etherscan...");
+    
+    await new Promise(resolve => setTimeout(resolve, 20000)); // Wait for Etherscan to index
+    
+    try {
+      await hre.run("verify:verify", {
+        address: multiSigPlugin.address,
+        constructorArguments: [],
+      });
+      
+      await hre.run("verify:verify", {
+        address: factory.address,
+        constructorArguments: [entryPoint.address],
+      });
+      
+      console.log("✅ Contracts verified!");
+    } catch (error) {
+      console.log("⚠️  Verification failed:", error.message);
+    }
+  }
+
+  return deploymentInfo;
+}
+
+// Test script
+async function testDeployment(deploymentInfo) {
+  console.log("\n🧪 Running deployment tests...\n");
+  
+  const [owner1, owner2, owner3] = await ethers.getSigners();
+  
+  // Get contract instances
+  const factory = await ethers.getContractAt("SmartAccountFactory", deploymentInfo.contracts.factory);
+  const multiSigPlugin = await ethers.getContractAt("MultiSigPlugin", deploymentInfo.contracts.multiSigPlugin);
+  
+  // Create a smart account
+  console.log("1. Creating smart account...");
+  const salt = 0;
+  const tx = await factory.createAccount(owner1.address, salt);
+  const receipt = await tx.wait();
+  
+  const accountAddress = await factory.getAddress(owner1.address, salt);
+  console.log("   Smart account created at:", accountAddress);
+  
+  // Get account instance
+  const account = await ethers.getContractAt("ModularSmartAccount", accountAddress);
+  
+  // Install multi-sig plugin
+  console.log("\n2. Installing multi-sig plugin...");
+  const owners = [owner1.address, owner2.address, owner3.address];
+  const threshold = 2;
+  
+  const installData = ethers.utils.defaultAbiCoder.encode(
+    ["address[]", "uint256"],
+    [owners, threshold]
+  );
+  
+  // Note: This would normally be done through a UserOperation
+  const selector = "0x00000000"; // Custom selector for multi-sig
+  await account.connect(owner1).installPlugin(selector, multiSigPlugin.address, installData);
+  console.log("   Multi-sig plugin installed with", owners.length, "owners and threshold of", threshold);
+  
+  // Fund the account
+  console.log("\n3. Funding account...");
+  await owner1.sendTransaction({
+    to: accountAddress,
+    value: ethers.utils.parseEther("1.0")
+  });
+  const balance = await ethers.provider.getBalance(accountAddress);
+  console.log("   Account balance:", ethers.utils.formatEther(balance), "ETH");
+  
+  console.log("\n✅ All tests passed!");
+}
+
+// Run deployment and tests
+main()
+  .then(async (deploymentInfo) => {
+    if (process.env.RUN_TESTS === "true") {
+      await testDeployment(deploymentInfo);
+    }
+    process.exit(0);
+  })
+  .catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
